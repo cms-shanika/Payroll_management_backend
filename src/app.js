@@ -12,11 +12,31 @@ const salaryRoutes = require('./routes/salary.routes');
 
 const app = express();
 
+/** ------Security / Middleware ------- */
+
+//If you'll sed cookies form the front end , enable credentials.
+
+const corsOptions = {
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',         //new chnages
+    credentials: true,                                                   //new chnages
+    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],            //new changes
+    allowedHeaders: ['Content-Type','Authorization'],                   //new changes
+};
+
+
 // global middleware
+
+app.use(cors(corsOptions));
+
+app.use(cors(corsOptions));               //new chnages
+
 app.use(helmet());
-app.use(cors());
-app.use(express.json());
+
+//body parsers
+app.use(express.json({ limit: '10mb'}));
 app.use(express.urlencoded({ extended: true }));
+
+//logs
 app.use(morgan('dev'));
 
 // static serving of uploaded files (so UI can load images/docs)
