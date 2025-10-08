@@ -54,3 +54,8 @@ app.get('/health', (req, res) => res.json({ ok:true, status: 'UP' }));
 app.use((req,res)=>res.status(404).json({ ok:false, message: 'Route not found'}));
 
 module.exports = app;
+
+
+
+
+
