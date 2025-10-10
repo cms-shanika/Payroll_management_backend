@@ -1,7 +1,5 @@
 // src/controllers/employee.controller.js
 const pool = require('../config/db');
-// const { employeeListPdf } = require('../utils/pdf'); // optional
-const path = require('path');
 
 exports.createEmployee = async (req, res) => {
   const {
@@ -9,19 +7,17 @@ exports.createEmployee = async (req, res) => {
     designation, status, joining_date, address, emergency_contact
   } = req.body;
 
-  // files from multer
-  const profile_photo_path = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g, '/');
+  const profile_photo_path = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g,'/');
   const docs = req.files?.documents || [];
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-
     const [result] = await conn.query(
       `INSERT INTO employees
        (employee_code, full_name, email, phone, department_id, designation, status, joining_date,
         address, emergency_contact, profile_photo_path, created_by_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         employee_code || null,
         full_name,
@@ -57,7 +53,7 @@ exports.createEmployee = async (req, res) => {
   }
 };
 
-exports.getEmployees = async (req, res) => {
+exports.getEmployees = async (_req, res) => {
   const [rows] = await pool.query(
     `SELECT e.*, d.name AS department_name
      FROM employees e
@@ -75,7 +71,7 @@ exports.getEmployeeById = async (req, res) => {
      LEFT JOIN departments d ON d.id = e.department_id
      WHERE e.id = ?`, [id]
   );
-  if (!emp) return res.status(404).json({ ok:false, message: 'Not found' });
+  if (!emp) return res.status(404).json({ ok:false, message:'Not found' });
 
   const [docs] = await pool.query(
     'SELECT id, file_name, file_path, file_type, uploaded_at FROM employee_documents WHERE employee_id = ?',
@@ -87,7 +83,6 @@ exports.getEmployeeById = async (req, res) => {
 
 exports.updateEmployee = async (req, res) => {
   const id = Number(req.params.id);
-
   const {
     employee_code, full_name, email, phone, department_id,
     designation, status, joining_date, address, emergency_contact
@@ -111,13 +106,13 @@ exports.updateEmployee = async (req, res) => {
      WHERE id = ?`,
     [
       employee_code, full_name, email, phone,
-      department_id ? Number(department_id) : null, designation, status,
-      joining_date, address, emergency_contact,
+      department_id ? Number(department_id) : null,
+      designation, status, joining_date, address, emergency_contact,
       profile_photo_path, id
     ]
   );
 
-  if (!r.affectedRows) return res.status(404).json({ ok:false, message: 'Not found' });
+  if (!r.affectedRows) return res.status(404).json({ ok:false, message:'Not found' });
 
   const docs = req.files?.documents || [];
   for (const f of docs) {
@@ -127,38 +122,12 @@ exports.updateEmployee = async (req, res) => {
     );
   }
 
-  res.json({ ok:true, message: 'Updated' });
+  res.json({ ok:true, message:'Updated' });
 };
 
 exports.deleteEmployee = async (req, res) => {
   const id = Number(req.params.id);
   const [r] = await pool.query('DELETE FROM employees WHERE id = ?', [id]);
-  if (!r.affectedRows) return res.status(404).json({ ok:false, message: 'Not found' });
-  res.json({ ok:true, message: 'Deleted' });
-};
-
-exports.exportEmployees = async (_req, res) => {
-  // simple CSV export (you can plug your PDF util back later)
-  const [rows] = await pool.query(
-    `SELECT e.employee_code, e.full_name, d.name AS department_name,
-            e.designation, e.status, e.joining_date
-     FROM employees e
-     LEFT JOIN departments d ON d.id = e.department_id
-     ORDER BY e.full_name ASC`
-  );
-
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="employees.csv"');
-  res.write('employee_code,full_name,department,designation,status,joining_date\n');
-  rows.forEach(r => {
-    res.write([
-      r.employee_code || '',
-      `"${(r.full_name || '').replace(/"/g,'""')}"`,
-      `"${(r.department_name || '').replace(/"/g,'""')}"`,
-      `"${(r.designation || '').replace(/"/g,'""')}"`,
-      r.status || '',
-      r.joining_date ? new Date(r.joining_date).toISOString().slice(0,10) : ''
-    ].join(',') + '\n');
-  });
-  return res.end();
+  if (!r.affectedRows) return res.status(404).json({ ok:false, message:'Not found' });
+  res.json({ ok:true, message:'Deleted' });
 };
