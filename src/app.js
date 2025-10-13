@@ -7,6 +7,8 @@ const path = require('path');
 
 const authRoutes = require('./routes/auth.routes');
 const employeeRoutes = require('./routes/employee.routes');
+const salaryRoutes = require('./routes/salary.routes');             //new updates
+
 
 const app = express();
 
@@ -26,6 +28,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/employees', employeeRoutes);
+app.use('/api/salary', salaryRoutes);       //new updates
+
 
 app.get('/health', (_req, res) => res.json({ ok:true, status:'UP' }));
 app.use((req,res)=>res.status(404).json({ ok:false, message: 'Route not found'}));
