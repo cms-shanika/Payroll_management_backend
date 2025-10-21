@@ -8,8 +8,8 @@ const path = require('path');
 
 const authRoutes = require('./routes/auth.routes');
 const employeeRoutes = require('./routes/employee.routes');
-const salaryRoutes = require('./routes/salary.routes'); // (your existing file)
-const departmentRoutes = require('./routes/department.routes'); // NEW
+const salaryRoutes = require('./routes/salary.routes');
+const departmentRoutes = require('./routes/department.routes');
 
 const app = express();
 
@@ -25,12 +25,13 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
+// serve /uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/salary', salaryRoutes);
-app.use('/api/departments', departmentRoutes); // NEW
+app.use('/api/departments', departmentRoutes);
 
 app.get('/health', (_req, res) => res.json({ ok:true, status:'UP' }));
 app.use((req,res)=>res.status(404).json({ ok:false, message: 'Route not found'}));

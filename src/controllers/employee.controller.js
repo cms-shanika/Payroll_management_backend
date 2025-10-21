@@ -1,7 +1,31 @@
 // src/controllers/employee.controller.js
 const pool = require('../config/db');
+const path = require('path');
+const fs = require('fs');
 
-// helper: get or create department by name (string from frontend)
+function baseUrl(req) {
+  return process.env.BACKEND_PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+}
+function toUrl(req, filePath) {
+  if (!filePath) return null;
+  const filename = String(filePath).split(/[/\\]/).pop();
+  return `${baseUrl(req)}/uploads/${filename}`;
+}
+function kindFromType(t = '') {
+  if (t.startsWith('image/')) return 'image';
+  if (t === 'application/pdf') return 'pdf';
+  return 'file';
+}
+function extractCategory(file_name = '') {
+  // we store "Category::original.ext" for personal documents (no DB change needed)
+  const m = String(file_name).match(/^([^:]+)::/);
+  return m ? m[1] : null;
+}
+function stripCategoryPrefix(name = '') {
+  return String(name).replace(/^[^:]+::/, '');
+}
+
+// helper: get or create department by name
 async function getOrCreateDepartmentId(conn, deptName) {
   if (!deptName) return null;
   const name = String(deptName).trim();
@@ -15,44 +39,30 @@ async function getOrCreateDepartmentId(conn, deptName) {
 }
 
 exports.createEmployee = async (req, res) => {
-  // FRONTEND sends mixed fields (personal + official + kin + bank)
   const {
-    // personal
     first_name, last_name, initials, calling_name,
     email, personal_email, country_code, phone,
     gender, dob, marital_status, nationality, religion, nic,
     address_permanent, address_temporary,
 
-    // official
     appointment_date,
-    department,            // (string name from UI)
-    designation,
-    working_office, branch, employment_type,
-    basic_salary,
-    status = 'Active',
-    supervisor, grade, designated_emails, epf_no,
+    department, designation, working_office, branch, employment_type,
+    basic_salary, status = 'Active', supervisor, grade, designated_emails, epf_no,
 
-    // kin
-    kin_name, kin_relationship, kin_nic, kin_dob,
-
-    // NOTE: joining_date is called "appointment_date" in the new UI
+    kin_name, relationship, kin_nic, kin_dob,
   } = req.body;
 
   const profilePhotoPath = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g, '/');
   const generalDocs = Array.isArray(req.files?.documents) ? req.files.documents : [];
-  const bankDoc = req.files?.bankDocument?.[0]; // optional
+  const bankDoc = req.files?.bankDocument?.[0];
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
 
-    // departments: store by name -> id
     const department_id = await getOrCreateDepartmentId(conn, department);
-
-    // Build full_name for listing (keep old column usable by EmployeeInfo table)
     const full_name = [first_name, last_name].filter(Boolean).join(' ').trim() || calling_name || email;
 
-    // Insert employee
     const [empIns] = await conn.query(
       `INSERT INTO employees
        (employee_code, full_name, email, personal_email, phone, country_code,
@@ -65,29 +75,20 @@ exports.createEmployee = async (req, res) => {
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
-        null, // employee_code (optional, could auto-generate later)
-        full_name, email || null, personal_email || null,
+        null, full_name, email || null, personal_email || null,
         phone || null, country_code || null,
         department_id, designation || null, status || 'Active',
-        // keep joining_date = appointment_date for compatibility with list filters
         appointment_date || null, appointment_date || null,
-        // "address" old column: we mirror permanent
-        address_permanent || null,
-        address_permanent || null, address_temporary || null,
-        null, // emergency_contact (not in new UI — keep null)
-        profilePhotoPath || null,
-        (req.user && req.user.id) || 1,
-
+        address_permanent || null, address_permanent || null, address_temporary || null,
+        null, profilePhotoPath || null, (req.user && req.user.id) || 1,
         first_name || null, last_name || null, initials || null, calling_name || null,
         gender || null, dob || null, marital_status || null, nationality || null, religion || null, nic || null,
         working_office || null, branch || null, employment_type || null, supervisor || null, grade || null,
         designated_emails || null, epf_no || null,
       ]
     );
-
     const employeeId = empIns.insertId;
 
-    // Salary (basic_salary)
     if (basic_salary && !Number.isNaN(Number(basic_salary))) {
       await conn.query(
         'INSERT INTO salaries (employee_id, basic_salary) VALUES (?, ?)',
@@ -95,19 +96,14 @@ exports.createEmployee = async (req, res) => {
       );
     }
 
-    // Kin (optional)
-    if (kin_name || kin_relationship || kin_nic || kin_dob) {
+    if (kin_name || relationship || kin_nic || kin_dob) {
       await conn.query(
-        'INSERT INTO employee_kin (employee_id, name, relationship, nic, dob) VALUES (?,?,?,?,?)',
-        [employeeId, kin_name || null, kin_relationship || null, kin_nic || null, kin_dob || null]
+        'INSERT INTO employee_kin (employee_id, kin_name, relationship, kin_nic, kin_dob) VALUES (?,?,?,?,?)',
+        [employeeId, kin_name || null, relationship || null, kin_nic || null, kin_dob || null]
       );
     }
 
-    // Bank account (optional)
-    const {
-      account_number, account_name, bank_name, branch_name,
-    } = req.body;
-
+    const { account_number, account_name, bank_name, branch_name } = req.body;
     if (account_number || account_name || bank_name || branch_name) {
       await conn.query(
         `INSERT INTO employee_bank_accounts
@@ -117,11 +113,14 @@ exports.createEmployee = async (req, res) => {
       );
     }
 
-    // Docs
+    // Save documents. We keep the selected category in the file_name prefix "Category::original.ext"
+    const category = (req.body.document_type || '').trim();
     for (const f of generalDocs) {
+      const original = f.originalname;
+      const storedName = category ? `${category}::${original}` : original;
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
-        [employeeId, f.originalname, f.path.replace(/\\/g, '/'), f.mimetype]
+        [employeeId, storedName, f.path.replace(/\\/g, '/'), f.mimetype]
       );
     }
     if (bankDoc) {
@@ -142,16 +141,17 @@ exports.createEmployee = async (req, res) => {
   }
 };
 
-exports.getEmployees = async (_req, res) => {
+exports.getEmployees = async (req, res) => {
   const [rows] = await pool.query(
     `SELECT e.*, d.name AS department_name
      FROM employees e
      LEFT JOIN departments d ON d.id = e.department_id
      ORDER BY e.created_at DESC`
   );
-  // Compatible with EmployeeInfo.jsx expectations:
-  // - department_name
-  // - status, designation, phone, joining_date, employee_code/full_name, etc.
+  // add profile_photo_url for listing
+  for (const r of rows) {
+    r.profile_photo_url = r.profile_photo_path ? toUrl(req, r.profile_photo_path) : null;
+  }
   res.json({ ok: true, data: rows });
 };
 
@@ -167,26 +167,32 @@ exports.getEmployeeById = async (req, res) => {
   if (!emp) return res.status(404).json({ ok: false, message: 'Not found' });
 
   const [docs] = await pool.query(
-    'SELECT id, file_name, file_path, file_type, uploaded_at FROM employee_documents WHERE employee_id = ?',
+    'SELECT id, file_name, file_path, file_type, uploaded_at FROM employee_documents WHERE employee_id = ? ORDER BY id DESC',
     [id]
   );
-  const [[kin]] = await pool.query(
-    'SELECT * FROM employee_kin WHERE employee_id = ? LIMIT 1',
-    [id]
-  );
-  const [[bank]] = await pool.query(
-    'SELECT * FROM employee_bank_accounts WHERE employee_id = ? LIMIT 1',
-    [id]
-  );
-  const [[sal]] = await pool.query(
-    'SELECT basic_salary FROM salaries WHERE employee_id = ? ORDER BY id DESC LIMIT 1',
-    [id]
-  );
+  const [[kin]] = await pool.query('SELECT * FROM employee_kin WHERE employee_id = ? LIMIT 1', [id]);
+  const [[bank]] = await pool.query('SELECT * FROM employee_bank_accounts WHERE employee_id = ? LIMIT 1', [id]);
+  const [[sal]]  = await pool.query('SELECT basic_salary FROM salaries WHERE employee_id = ? ORDER BY id DESC LIMIT 1', [id]);
 
-  emp.documents = docs;
   emp.kin = kin || null;
   emp.bank_account = bank || null;
   emp.basic_salary = sal ? sal.basic_salary : null;
+
+  emp.documents = (docs || []).map(d => {
+    const url = toUrl(req, d.file_path);
+    const category = extractCategory(d.file_name);
+    const cleanName = stripCategoryPrefix(d.file_name);
+    return {
+      ...d,
+      file_name: cleanName,
+      file_path: d.file_path,
+      url,
+      kind: kindFromType(d.file_type),
+      doc_category: category,            // <-- used by FE
+    };
+  });
+
+  emp.profile_photo_url = emp.profile_photo_path ? toUrl(req, emp.profile_photo_path) : null;
 
   res.json({ ok: true, data: emp });
 };
@@ -194,7 +200,6 @@ exports.getEmployeeById = async (req, res) => {
 exports.updateEmployee = async (req, res) => {
   const id = Number(req.params.id);
 
-  // same shape as create; only update what is provided
   const body = req.body || {};
   const profilePhotoPath = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g, '/');
   const generalDocs = Array.isArray(req.files?.documents) ? req.files.documents : [];
@@ -204,13 +209,11 @@ exports.updateEmployee = async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // map department name -> id if provided
     let department_id = null;
-    if (body.department) {
-      department_id = await getOrCreateDepartmentId(conn, body.department);
+    if (body.department || body.department_name) {
+      department_id = await getOrCreateDepartmentId(conn, body.department || body.department_name);
     }
 
-    // for listing consistency
     let full_name = undefined;
     if (body.first_name || body.last_name) {
       const fn = body.first_name || '';
@@ -228,14 +231,13 @@ exports.updateEmployee = async (req, res) => {
       department_id,
       designation: body.designation,
       status: body.status,
-      joining_date: body.appointment_date,   // keep aligned
+      joining_date: body.appointment_date,
       appointment_date: body.appointment_date,
       address: body.address_permanent,
       address_permanent: body.address_permanent,
       address_temporary: body.address_temporary,
       profile_photo_path: profilePhotoPath,
 
-      // personal extras
       first_name: body.first_name,
       last_name: body.last_name,
       initials: body.initials,
@@ -247,95 +249,49 @@ exports.updateEmployee = async (req, res) => {
       religion: body.religion,
       nic: body.nic,
 
-      // official
       working_office: body.working_office,
       branch: body.branch,
       employment_type: body.employment_type,
       supervisor: body.supervisor,
       grade: body.grade,
       designated_emails: body.designated_emails,
-      epf_no: body.epf_no
+      epf_no: body.epf_no,
+
+      kin_name: body.kin_name,
+      kin_nic: body.kin_nic,
+      kin_dob: body.kin_dob,
+      relationship: body.relationship
     };
 
-    // Build dynamic SQL that only sets provided values
     const setParts = [];
     const setVals = [];
     for (const [k, v] of Object.entries(fields)) {
-      if (v === undefined) continue; // skip absent
+      if (v === undefined) continue;
       setParts.push(`${k} = COALESCE(?, ${k})`);
       setVals.push(v || null);
     }
     setVals.push(id);
 
     if (setParts.length) {
-      const [r] = await conn.query(
-        `UPDATE employees SET ${setParts.join(', ')} WHERE id = ?`,
-        setVals
-      );
+      const [r] = await conn.query(`UPDATE employees SET ${setParts.join(', ')} WHERE id = ?`, setVals);
       if (!r.affectedRows) {
         await conn.rollback();
         return res.status(404).json({ ok: false, message: 'Not found' });
       }
     }
 
-    // salary
     if (body.basic_salary !== undefined && body.basic_salary !== null && body.basic_salary !== '') {
-      await conn.query(
-        'INSERT INTO salaries (employee_id, basic_salary) VALUES (?, ?)',
-        [id, Number(body.basic_salary)]
-      );
-    }
-
-    // kin (upsert simple)
-    const hasKinPayload = (body.kin_name || body.kin_relationship || body.kin_nic || body.kin_dob);
-    if (hasKinPayload) {
-      const [[existing]] = await conn.query('SELECT id FROM employee_kin WHERE employee_id = ? LIMIT 1', [id]);
-      if (existing) {
-        await conn.query(
-          'UPDATE employee_kin SET name = ?, relationship = ?, nic = ?, dob = ? WHERE id = ?',
-          [body.kin_name || null, body.kin_relationship || null, body.kin_nic || null, body.kin_dob || null, existing.id]
-        );
-      } else {
-        await conn.query(
-          'INSERT INTO employee_kin (employee_id, name, relationship, nic, dob) VALUES (?,?,?,?,?)',
-          [id, body.kin_name || null, body.kin_relationship || null, body.kin_nic || null, body.kin_dob || null]
-        );
-      }
-    }
-
-    // bank (upsert)
-    if (
-      body.account_number !== undefined ||
-      body.account_name !== undefined ||
-      body.bank_name !== undefined ||
-      body.branch_name !== undefined
-    ) {
-      const [[existing]] = await conn.query('SELECT id FROM employee_bank_accounts WHERE employee_id = ? LIMIT 1', [id]);
-      if (existing) {
-        await conn.query(
-          `UPDATE employee_bank_accounts
-             SET account_number = COALESCE(?, account_number),
-                 account_name   = COALESCE(?, account_name),
-                 bank_name      = COALESCE(?, bank_name),
-                 branch_name    = COALESCE(?, branch_name)
-           WHERE id = ?`,
-          [body.account_number || null, body.account_name || null, body.bank_name || null, body.branch_name || null, existing.id]
-        );
-      } else {
-        await conn.query(
-          `INSERT INTO employee_bank_accounts
-            (employee_id, account_number, account_name, bank_name, branch_name)
-           VALUES (?,?,?,?,?)`,
-          [id, body.account_number || null, body.account_name || null, body.bank_name || null, body.branch_name || null]
-        );
-      }
+      await conn.query('INSERT INTO salaries (employee_id, basic_salary) VALUES (?, ?)', [id, Number(body.basic_salary)]);
     }
 
     // docs
+    const category = (body.document_type || '').trim();
     for (const f of generalDocs) {
+      const original = f.originalname;
+      const storedName = category ? `${category}::${original}` : original;
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
-        [id, f.originalname, f.path.replace(/\\/g, '/'), f.mimetype]
+        [id, storedName, f.path.replace(/\\/g, '/'), f.mimetype]
       );
     }
     if (bankDoc) {
@@ -361,4 +317,48 @@ exports.deleteEmployee = async (req, res) => {
   const [r] = await pool.query('DELETE FROM employees WHERE id = ?', [id]);
   if (!r.affectedRows) return res.status(404).json({ ok: false, message: 'Not found' });
   res.json({ ok: true, message: 'Deleted' });
+};
+
+// ---------- NEW: per-document delete/replace ----------
+
+exports.deleteEmployeeDocument = async (req, res) => {
+  const empId = Number(req.params.id);
+  const docId = Number(req.params.docId);
+
+  const [[doc]] = await pool.query(
+    'SELECT file_path FROM employee_documents WHERE id = ? AND employee_id = ?',
+    [docId, empId]
+  );
+  if (!doc) return res.status(404).json({ ok:false, message:'Document not found' });
+
+  await pool.query('DELETE FROM employee_documents WHERE id = ? AND employee_id = ?', [docId, empId]);
+
+  try {
+    fs.unlinkSync(path.resolve(doc.file_path));
+  } catch (_) {}
+  res.json({ ok:true, message:'Document deleted' });
+};
+
+exports.replaceEmployeeDocument = async (req, res) => {
+  const empId = Number(req.params.id);
+  const docId = Number(req.params.docId);
+  const f = req.file;
+  if (!f) return res.status(400).json({ ok:false, message:'file required' });
+
+  const [[doc]] = await pool.query(
+    'SELECT file_path FROM employee_documents WHERE id = ? AND employee_id = ?',
+    [docId, empId]
+  );
+  if (!doc) return res.status(404).json({ ok:false, message:'Document not found' });
+
+  await pool.query(
+    'UPDATE employee_documents SET file_name = ?, file_path = ?, file_type = ? WHERE id = ? AND employee_id = ?',
+    [f.originalname, f.path.replace(/\\/g, '/'), f.mimetype, docId, empId]
+  );
+
+  try {
+    fs.unlinkSync(path.resolve(doc.file_path));
+  } catch (_) {}
+
+  res.json({ ok:true, message:'Document replaced' });
 };
