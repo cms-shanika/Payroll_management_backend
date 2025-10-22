@@ -1,3 +1,4 @@
+// src/controllers/salary.controller.js
 const pool = require('../config/db');
 const PDFDocument = require('pdfkit');
 
@@ -8,13 +9,29 @@ async function listAllowances(req, res) {
     const { employee_id } = req.query; // optional
     const [rows] = employee_id
       ? await pool.query(
-          'SELECT * FROM allowances WHERE employee_id=? ORDER BY created_at DESC',
+          `
+          SELECT 
+            id, employee_id, 
+            name AS description,         -- alias for FE
+            category, amount, taxable, frequency,
+            effective_from, effective_to,
+            status, created_at, updated_at
+          FROM allowances
+          WHERE employee_id=?
+          ORDER BY created_at DESC
+          `,
           [employee_id]
         )
       : await pool.query(`
-          SELECT a.*, e.full_name
+          SELECT 
+            a.id, a.employee_id, 
+            a.name AS description,       -- alias for FE
+            a.category, a.amount, a.taxable, a.frequency,
+            a.effective_from, a.effective_to,
+            a.status, a.created_at, a.updated_at,
+            e.full_name
           FROM allowances a
-          JOIN employees e ON e.id=a.employee_id
+          JOIN employees e ON e.id = a.employee_id
           ORDER BY a.created_at DESC
         `);
     res.json({ ok: true, data: rows });
@@ -138,13 +155,41 @@ async function setBasicSalary(req, res) {
 
 /* ===================== CREATES (forms) ===================== */
 
+/**
+ * Add Allowance
+ * Accepts: employee_id, description, category, amount, taxable, frequency, effective_from, effective_to, status
+ * DB: stores description -> name (no migration needed)
+ */
 async function addAllowance(req, res) {
-  const { employee_id, name, amount, frequency, status = 'Active' } = req.body;
-  await pool.query(
-    'INSERT INTO allowances (employee_id, name, amount, frequency, status, created_at) VALUES (?,?,?,?,?, NOW())',
-    [employee_id, name, amount, frequency || 'Monthly', status]
-  );
-  res.json({ ok: true, message: 'Allowance added' });
+  try {
+    const {
+      employee_id,
+      description,                 // NEW (mapped to DB column `name`)
+      category = null,
+      amount,
+      taxable = 0,
+      frequency = 'Monthly',
+      effective_from = null,
+      effective_to = null,
+      status = 'Active',
+    } = req.body;
+
+    if (!employee_id || !description || amount == null) {
+      return res.status(400).json({ ok: false, message: 'employee_id, description, amount are required' });
+    }
+
+    await pool.query(
+      `INSERT INTO allowances
+        (employee_id, name, category, amount, taxable, frequency, effective_from, effective_to, status, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?, NOW())`,
+      [employee_id, description, category, amount, Number(taxable) ? 1 : 0, frequency, effective_from, effective_to, status]
+    );
+
+    res.json({ ok: true, message: 'Allowance added' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to add allowance' });
+  }
 }
 
 async function addOvertimeAdjustment(req, res) {
@@ -180,33 +225,42 @@ async function listEarnings(req, res) {
     WHERE e.status='Active'
   `);
 
+  // Build allowance/overtime/bonus maps with optional period filter
   const params = [];
-  let dateFilter = '';
+  let allowWhere = "WHERE status='Active'";
+  let otWhere = "WHERE status='Approved'";
+  let bonusWhere = "WHERE 1=1";
+
   if (month && year) {
-    dateFilter = ' AND MONTH(effective_date)=? AND YEAR(effective_date)=? ';
-    params.push(Number(month), Number(year));
+    // Use effective_from/effective_to for allowances period inclusion
+    const first = new Date(Number(year), Number(month) - 1, 1);
+    const last = new Date(Number(year), Number(month), 0); // end of month
+    const firstStr = first.toISOString().slice(0, 10);
+    const lastStr = last.toISOString().slice(0, 10);
+
+    allowWhere += ' AND (effective_from IS NULL OR effective_from <= ?)';
+    allowWhere += ' AND (effective_to IS NULL OR effective_to >= ?)';
+    params.push(lastStr, firstStr);
+
+    otWhere += ' AND MONTH(effective_date)=? AND YEAR(effective_date)=?';
+    bonusWhere += ' AND MONTH(effective_date)=? AND YEAR(effective_date)=?';
+    params.push(Number(month), Number(year), Number(month), Number(year));
   }
 
-  const [allowMapRows] = await pool.query(`
-    SELECT employee_id, SUM(amount) AS total
-    FROM allowances
-    WHERE status='Active' ${dateFilter}
-    GROUP BY employee_id
-  `, params);
+  const [allowMapRows] = await pool.query(
+    `SELECT employee_id, SUM(amount) AS total FROM allowances ${allowWhere} GROUP BY employee_id`,
+    params.slice(0, allowWhere.includes('?') ? 2 : 0) // only first two params belong to allowances
+  );
 
-  const [otMapRows] = await pool.query(`
-    SELECT employee_id, SUM(amount) AS total
-    FROM overtime_adjustments
-    WHERE status='Approved' ${dateFilter}
-    GROUP BY employee_id
-  `, params);
-
-  const [bonusMapRows] = await pool.query(`
-    SELECT employee_id, SUM(amount) AS total
-    FROM bonuses
-    WHERE 1=1 ${dateFilter}
-    GROUP BY employee_id
-  `, params);
+  const restParams = month && year ? [Number(month), Number(year)] : [];
+  const [otMapRows] = await pool.query(
+    `SELECT employee_id, SUM(amount) AS total FROM overtime_adjustments ${otWhere} GROUP BY employee_id`,
+    restParams
+  );
+  const [bonusMapRows] = await pool.query(
+    `SELECT employee_id, SUM(amount) AS total FROM bonuses ${bonusWhere} GROUP BY employee_id`,
+    restParams
+  );
 
   const toMap = (rows) => rows.reduce((m, r) => (m[r.employee_id] = Number(r.total || 0), m), {});
   const A = toMap(allowMapRows);
@@ -245,28 +299,36 @@ async function monthSummary(req, res) {
     WHERE e.status='Active'
   `);
 
-  const params = [Number(month), Number(year)];
+  // Period bounds
+  const first = new Date(Number(year), Number(month) - 1, 1);
+  const last = new Date(Number(year), Number(month), 0);
+  const firstStr = first.toISOString().slice(0,10);
+  const lastStr = last.toISOString().slice(0,10);
 
+  // Allowances active within the month
   const [allowRows] = await pool.query(`
     SELECT employee_id, SUM(amount) AS total
     FROM allowances
-    WHERE status='Active' AND MONTH(effective_date)<=? AND YEAR(effective_date)<=?
+    WHERE status='Active'
+      AND (effective_from IS NULL OR effective_from <= ?)
+      AND (effective_to IS NULL OR effective_to >= ?)
     GROUP BY employee_id
-  `, params);
+  `, [lastStr, firstStr]);
 
+  // Overtime/Bonuses strictly in the month
   const [otRows] = await pool.query(`
     SELECT employee_id, SUM(amount) AS total
     FROM overtime_adjustments
     WHERE status='Approved' AND MONTH(effective_date)=? AND YEAR(effective_date)=?
     GROUP BY employee_id
-  `, params);
+  `, [Number(month), Number(year)]);
 
   const [bonusRows] = await pool.query(`
     SELECT employee_id, SUM(amount) AS total
     FROM bonuses
     WHERE MONTH(effective_date)=? AND YEAR(effective_date)=?
     GROUP BY employee_id
-  `, params);
+  `, [Number(month), Number(year)]);
 
   const [dedRows] = await pool.query(`
     SELECT employee_id, SUM(
@@ -278,7 +340,7 @@ async function monthSummary(req, res) {
     FROM deductions
     WHERE status='Active' AND MONTH(effective_date)<=? AND YEAR(effective_date)<=?
     GROUP BY employee_id
-  `, params);
+  `, [Number(month), Number(year)]);
 
   const map = r => r.reduce((m, x) => (m[x.employee_id] = Number(x.total||0), m), {});
   const A = map(allowRows), O = map(otRows), B = map(bonusRows), D = map(dedRows);
