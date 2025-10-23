@@ -4,6 +4,7 @@ const PDFDocument = require('pdfkit');
 
 /* ===================== LISTS (for grids) ===================== */
 
+// CLEAN + CONSISTENT: no inline SQL comments, always join employees and alias fields consistently
 async function listAllowances(req, res) {
   try {
     const { employee_id } = req.query; // optional
@@ -128,6 +129,85 @@ async function createDeduction(req, res) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Failed to save deduction' });
   }
+}
+
+
+//get one deduction by id 
+
+async function getDeductionById(req, res) {
+  try {
+    const {id} = req.params;
+    const [[row]] = await pool.query(
+      `SELECT id, employee_id , name , type, basis , percent , amount , status , effective_date FROM deductions WHERE id=?`,
+      [id]
+
+
+    );
+    if (!row) return res.status(404).json({ok: false, message: 'Not Found'});
+    res.json({ok:true , data: row});
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ok: false, message: 'Failed to load deduction'});
+  }
+  
+}
+
+// update deduction 
+async function updateDeduction(req, res) {
+  try {
+    const {id} = req.params;
+    const {
+      employee_id,
+      name,
+      type,
+      basis,
+      percent,
+      amount,
+      effective_date,
+      status = 'Active',
+
+    } = req.body;
+
+    if (!employee_id || !name || !type || !basis || !effective_date) {
+      return res.status(400).json({ok: false, message: 'Missing required fields'})
+    }
+
+    await pool.query(
+      `UPDATE deductions SET employee_id=?, name=?, type=?,basis=?,percent=?, amount=?, effective_date=?,status=?,updated_at=NOW() WHERE id=?`,
+      [
+        employee_id,
+        name,
+        type,
+        basis,
+        basis === 'Percent' ? percent : null,
+        basis === 'Fixed' ? amount : null,
+        effective_date,
+        status,
+        id,
+      ]
+    );
+
+    res.json({ok: true, message: 'Deduction Updated'});
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ok: false, message: 'Failed to Update deduction'});
+  }
+
+}
+
+//delete deduction
+
+async function deleteDeduction(req, res) {
+  try {
+    const {id} = req.params;
+    await pool.query('DELETE FROM deductions WHERE id=?', [id]);
+    res.json({ok: true , message: 'Deduction deleted'});
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ok: false, message: 'Failed to delete deduction'});
+  }
+  
 }
 
 /* ========== BASIC SALARY (also used by percent preview) ========== */
@@ -449,6 +529,13 @@ module.exports = {
   addAllowance,
   addOvertimeAdjustment,
   addBonus,
+
+  //single item ops for deductions 
+  getDeductionById,
+  updateDeduction,
+  deleteDeduction,
+
+
 
   // salary helpers
   setBasicSalary,

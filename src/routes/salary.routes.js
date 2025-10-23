@@ -19,6 +19,10 @@ router.get('/allowances', ctrl.listAllowances);
 router.get('/deductions', ctrl.listDeductions);
 router.post('/deductions', ctrl.createDeduction);
 
+router.get('/deductions/:id', ctrl.getDeductionById);
+router.put('/deductions/:id', ctrl.updateDeduction);
+router.delete('/deductions/:id', ctrl.deleteDeduction);
+
 // overtime / adjustments
 router.post('/overtime', ctrl.addOvertimeAdjustment);
 router.get('/overtime', ctrl.listOvertime);
