@@ -2,10 +2,497 @@
 const pool = require('../config/db');
 const PDFDocument = require('pdfkit');
 
+//new compensation adjusmnt
+
+// === Utils (date helpers for compensation) ===
+
+// month helpers for compensation flows 
+
+const endOfMonth = (yyyyMM) => {
+  // yyyyMM = 'YYYY-MM'
+  const [Y, M] = yyyyMM.split('-').map(Number);
+  const d = new Date(Y, M, 0); // last day
+  return d.toISOString().slice(0,10);
+};
+
+const startOfMonth = (yyyyMM) => {
+  const [Y, M] = yyyyMM.split('-').map(Number);
+  const d = new Date(Y, M - 1, 1);
+  return d.toISOString().slice(0,10);
+};
+
+// 
+//===========================================
+
+// static grades fallback
+
+const GRADES_FALLBACK = [
+  { grade_id: 1, grade_name: 'A' },
+  { grade_id: 2, grade_name: 'B' },
+  { grade_id: 3, grade_name: 'C' },
+];
+
+//GRADES - used by overtime section 
+
+const getGrades = async (_req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT grade_id, grade_name FROM grades ORDER BY grade_id');
+    if (!rows || !rows.length) return res.json(GRADES_FALLBACK);
+    return res.json(rows);
+  } catch (err) {
+    return res.json(GRADES_FALLBACK);
+  }
+}
+
+const gradeNameOf = async (gradeId) => {
+  try{
+    const [[row]] = await pool.query(
+      'SELECT grade_name FROM grades WHERE grade_id = ? LIMIT 1',
+      [gradeId]
+    );
+    return row?.grade_name || (GRADES_FALLBACK,find(g => g.gradeId == gradeId)?.grade_name ?? null);
+  } catch {
+    return GRADES_FALLBACK,find(g => g.grade_id == gradeId)?.grade_name ?? null;
+  }
+};
+
+/* =============================================================
+   OVERTIME (Grades, Rules, Adjustments)
+   Matches DB schema in your dump:
+   - grades (grade_id, grade_name)
+   - overtime_rule (rule_id, grade_id [UNIQUE], ot_rate, max_ot_hours, created_at)
+   - overtime_adjustments (adjustment_id, employee_id, grade_id, ot_hours, ot_rate, adjustment_reason, created_at)
+   - v_overtime_adjustments (includes ot_amount = ot_hours * ot_rate)
+   ============================================================= */
+
+
+
+
+// === Get latest overtime rule for a grade
+const getOvertimeRulesByGrade = async (req, res) => {
+  try {
+    const { gradeId } = req.params;
+    const [rows] = await pool.query(
+      `SELECT rule_id, grade_id, ot_rate, max_ot_hours, created_at
+         FROM overtime_rule
+        WHERE grade_id = ?
+        ORDER BY rule_id DESC
+        LIMIT 1`,
+      [gradeId]
+    );
+    res.json(rows[0] || null);
+  } catch (err) {
+    console.error('getOvertimeRulesByGrade error:', err);
+    res.status(500).json({ message: 'Failed to fetch overtime rules' });
+  }
+};
+//****************************************************** */
+// === Upsert overtime rule for a grade (create or update current)
+const upsertOvertimeRules = async (req, res) => {
+  try {
+    const { grade_id, ot_rate, max_ot_hours } = req.body;
+    if (!grade_id || ot_rate == null || max_ot_hours == null) {
+      return res.status(400).json({ message: 'grade_id, ot_rate, max_ot_hours are required' });
+    }
+
+    // Because grade_id is UNIQUE (uq_overtime_rule_grade), use INSERT ... ON DUPLICATE KEY UPDATE
+    await pool.query(
+      `INSERT INTO overtime_rule (grade_id, ot_rate, max_ot_hours, created_at)
+       VALUES (?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE
+         ot_rate = VALUES(ot_rate),
+         max_ot_hours = VALUES(max_ot_hours),
+         created_at = NOW()`
+      , [grade_id, ot_rate, max_ot_hours]
+    );
+
+    res.json({ message: 'Overtime rule saved' });
+  } catch (err) {
+    console.error('upsertOvertimeRules error:', err);
+    res.status(500).json({ message: 'Failed to save overtime rule' });
+  }
+};
+
+// === Employee quick search (by name or id)
+const searchEmployees = async (req, res) => {
+  try {
+    const q = (req.query.search || '').trim();
+    const like = `%${q}%`;
+    const [rows] = await pool.query(
+      `SELECT e.id AS employee_id, e.full_name, e.grade_id, g.grade_name
+         FROM employees e
+         LEFT JOIN grades g ON g.grade_id = e.grade_id
+        WHERE e.full_name LIKE ? OR CAST(e.id AS CHAR) LIKE ?
+        ORDER BY e.full_name
+        LIMIT 50`,
+      [like, like]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('searchEmployees error:', err);
+    res.status(500).json({ message: 'Failed to search employees' });
+  }
+};
+
+// ****************************************************
+
+// === Create an overtime adjustment
+const createOvertimeAdjustment = async (req, res) => {
+  try {
+    let { employee_id, grade_id, ot_hours, ot_rate, adjustment_reason } = req.body || {};
+
+    if (!employee_id || ot_hours == null) {
+      return res.status(400).json({ ok: false, message: 'employee_id and ot_hours are required' });
+    }
+
+    // Validate employee and infer grade if not provided
+    const [[emp]] = await pool.query(
+      'SELECT id AS employee_id, grade_id FROM employees WHERE id = ? LIMIT 1',
+      [employee_id]
+    );
+    if (!emp) return res.status(404).json({ ok: false, message: 'Employee not found' });
+    if (!grade_id) grade_id = emp.grade_id || null;
+
+    // Fetch rule if rate missing
+    if (ot_rate == null) {
+      const [[rule]] = await pool.query(
+        `SELECT ot_rate, max_ot_hours
+           FROM overtime_rule
+          WHERE grade_id = ?
+          ORDER BY rule_id DESC
+          LIMIT 1`,
+        [grade_id]
+      );
+      if (!rule || rule.ot_rate == null) {
+        return res.status(400).json({ ok: false, message: 'No overtime rule found for this grade. Set a rule first.' });
+      }
+      ot_rate = rule.ot_rate;
+      // NOTE: If you need to enforce a *monthly* OT cap, you’d check accumulated hours here.
+      if (rule.max_ot_hours != null && Number(ot_hours) > Number(rule.max_ot_hours)) {
+        return res.status(400).json({ ok: false, message: `OT hours exceed monthly cap (${rule.max_ot_hours})` });
+      }
+    }
+
+    await pool.query(
+      `INSERT INTO overtime_adjustments (employee_id, grade_id, ot_hours, ot_rate, adjustment_reason)
+       VALUES (?, ?, ?, ?, ?)`,
+      [employee_id, grade_id || null, Number(ot_hours), Number(ot_rate), adjustment_reason || null]
+    );
+
+    return res.json({ ok: true, message: 'Overtime adjustment saved' });
+  } catch (err) {
+    console.error('createOvertimeAdjustment error:', err);
+    res.status(500).json({ ok: false, message: 'Failed to save overtime adjustment' });
+  }
+};
+
+
+// === List overtime adjustments by grade (uses view for ot_amount)
+const listOvertimeAdjustmentsByGrade = async (req, res) => {
+  try {
+    const { gradeId } = req.params;
+    const { from, to } = req.query;
+
+    const where = ['oa.grade_id = ?'];
+    const params = [gradeId];
+
+    if (from) { where.push('DATE(oa.created_at) >= ?'); params.push(from); }
+    if (to)   { where.push('DATE(oa.created_at) <= ?'); params.push(to); }
+
+    const [rows] = await pool.query(
+      `SELECT
+         oa.adjustment_id,
+         oa.employee_id,
+         e.full_name,
+         oa.grade_id,
+         g.grade_name,
+         oa.ot_hours,
+         oa.ot_rate,
+         (oa.ot_hours * oa.ot_rate) AS ot_amount,
+         oa.adjustment_reason,
+         oa.created_at
+       FROM overtime_adjustments oa
+       JOIN employees e ON e.id = oa.employee_id
+       LEFT JOIN grades g ON g.grade_id = oa.grade_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY oa.created_at DESC
+       LIMIT 500`,
+      params
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error('listOvertimeAdjustmentsByGrade error:', err);
+    res.status(500).json({ ok: false, message: 'Failed to load overtime entries' });
+  }
+};
+
+// === List overtime adjustments by employee (uses view)
+const listOvertimeAdjustmentsByEmployee = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { from, to } = req.query;
+
+    const where = ['oa.employee_id = ?'];
+    const params = [employeeId];
+
+    if (from) { where.push('DATE(oa.created_at) >= ?'); params.push(from); }
+    if (to)   { where.push('DATE(oa.created_at) <= ?'); params.push(to); }
+
+    const [rows] = await pool.query(
+      `SELECT
+         oa.adjustment_id,
+         oa.employee_id,
+         e.full_name,
+         oa.grade_id,
+         g.grade_name,
+         oa.ot_hours,
+         oa.ot_rate,
+         (oa.ot_hours * oa.ot_rate) AS ot_amount,
+         oa.adjustment_reason,
+         oa.created_at
+       FROM overtime_adjustments oa
+       JOIN employees e ON e.id = oa.employee_id
+       LEFT JOIN grades g ON g.grade_id = oa.grade_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY oa.created_at DESC
+       LIMIT 500`,
+      params
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error('listOvertimeAdjustmentsByEmployee error:', err);
+    res.status(500).json({ ok: false, message: 'Failed to fetch employee OT adjustments' });
+  }
+};
+
+
+
+// ===================== EMPLOYEE SEARCH (advanced) =====================
+const searchEmployeesAdvanced = async (req, res) => {
+  try {
+    const {
+      q = '',
+      department_id,
+      department,
+      grade_id,
+      grade,
+      limit = 500,
+      offset = 0,
+    } = req.query;
+
+    const clauses = [];
+    const params = [];
+
+    if (q) {
+      clauses.push('(e.full_name LIKE ? OR e.employee_code LIKE ? OR CAST(e.id AS CHAR) LIKE ?)');
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    if (department_id) { clauses.push('e.department_id = ?'); params.push(Number(department_id)); }
+    if (department)    { clauses.push('d.name LIKE ?');       params.push(`%${department}%`); }
+    if (grade_id)      { clauses.push('e.grade_id = ?');      params.push(Number(grade_id)); }
+    if (grade)         { clauses.push('g.grade_name = ?');    params.push(grade); }
+
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        e.id AS employee_id,
+        e.employee_code,
+        e.full_name,
+        COALESCE(d.name, e.department_name) AS department_name,
+        e.grade_id,
+        g.grade_name,
+        s.basic_salary
+      FROM employees e
+      LEFT JOIN departments d ON d.id = e.department_id
+      LEFT JOIN grades g ON g.grade_id = e.grade_id
+      LEFT JOIN salaries s ON s.employee_id = e.id
+      ${where}
+      ORDER BY e.full_name
+      LIMIT ? OFFSET ?
+      `,
+      [...params, Number(limit), Number(offset)]
+    );
+
+    res.json({ ok:true, data: rows });
+  } catch (err) {
+    console.error('searchEmployeesAdvanced error:', err);
+    res.status(500).json({ ok:false, message:'Failed to search employees' });
+  }
+};
+
+
+
+
+// ===================== DEPARTMENTS LIST =====================
+const listDepartments = async (_req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT id, name FROM departments ORDER BY name');
+    res.json({ ok:true, data: rows });
+  } catch (err) {
+    console.error('listDepartments error:', err);
+    res.status(500).json({ ok:false, message:'Failed to fetch departments' });
+  }
+};
+
+// ===================== COMPENSATION PREVIEW =====================
+// body: { type, mode, amount, percent, month, note, employee_ids: number[] }
+
+const previewCompensation = async (req, res) => {
+  try {
+    const { type, mode, amount, percent, month, note, employee_ids } = req.body;
+
+    if (!type || !mode || !month || !Array.isArray(employee_ids) || employee_ids.length === 0) {
+      return res.status(400).json({ ok:false, message:'type, mode, month, employee_ids required' });
+    }
+    if (mode === 'fixed' && (amount == null || isNaN(Number(amount)))) {
+      return res.status(400).json({ ok:false, message:'amount required for fixed mode' });
+    }
+    if (mode === 'percent' && (percent == null || isNaN(Number(percent)))) {
+      return res.status(400).json({ ok:false, message:'percent required for percent mode' });
+    }
+
+    const [rows] = await pool.query(
+      `
+      SELECT e.id AS employee_id, e.full_name, s.basic_salary
+      FROM employees e
+      LEFT JOIN salaries s ON s.employee_id = e.id
+      WHERE e.id IN (${employee_ids.map(()=>'?').join(',')})
+      `,
+      employee_ids
+    );
+
+    const items = rows.map(r => {
+      const basic = Number(r.basic_salary || 0);
+      const computed = mode === 'fixed'
+        ? Number(amount)
+        : (Number(percent) / 100) * basic;
+
+      return {
+        employee_id: r.employee_id,
+        name: r.full_name,
+        basic_salary: basic,
+        computed_amount: Number(computed.toFixed(2))
+      };
+    });
+
+    const total = items.reduce((a,b)=>a + b.computed_amount, 0);
+
+    res.json({
+      ok:true,
+      meta: { type, mode, month, note },
+      items,
+      total: Number(total.toFixed(2))
+    });
+  } catch (err) {
+    console.error('previewCompensation error:', err);
+    res.status(500).json({ ok:false, message:'Failed to preview compensation' });
+  }
+};
+
+// ===================== COMPENSATION APPLY (BULK) =====================
+// body: { type, mode, amount, percent, month, note, employee_ids: number[], category? }
+const applyCompensation = async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const { type, mode, amount, percent, month, note, employee_ids, category } = req.body;
+
+    if (!type || !mode || !month || !Array.isArray(employee_ids) || employee_ids.length === 0) {
+      return res.status(400).json({ ok:false, message:'type, mode, month, employee_ids required' });
+    }
+    if (mode === 'fixed' && (amount == null || isNaN(Number(amount)))) {
+      return res.status(400).json({ ok:false, message:'amount required for fixed mode' });
+    }
+    if (mode === 'percent' && (percent == null || isNaN(Number(percent)))) {
+      return res.status(400).json({ ok:false, message:'percent required for percent mode' });
+    }
+
+    const effectiveDate = endOfMonth(month);     // for bonuses
+    const effFrom = startOfMonth(month);         // for allowance window
+    const effTo   = endOfMonth(month);
+
+    const [rows] = await conn.query(
+      `
+      SELECT e.id AS employee_id, e.full_name, s.basic_salary
+      FROM employees e
+      LEFT JOIN salaries s ON s.employee_id = e.id
+      WHERE e.id IN (${employee_ids.map(()=>'?').join(',')})
+      `,
+      employee_ids
+    );
+
+    const calc = (basic) => mode === 'fixed'
+      ? Number(amount)
+      : (Number(percent)/100) * Number(basic || 0);
+
+    await conn.beginTransaction();
+
+    if (type === 'Bonus' || type === 'Arrears' || type === 'Correction') {
+      for (const r of rows) {
+        const val = Number(calc(r.basic_salary).toFixed(2));
+        await conn.query(
+          `INSERT INTO bonuses (employee_id, amount, reason, effective_date, created_by)
+           VALUES (?,?,?,?,?)`,
+          [r.employee_id, val, note || type, effectiveDate, req.user?.id || null]
+        );
+      }
+    } else if (type === 'Allowance') {
+      for (const r of rows) {
+        const val = Number(calc(r.basic_salary).toFixed(2));
+        await conn.query(
+          `INSERT INTO allowances
+           (employee_id, name, category, amount, taxable, frequency, effective_from, effective_to, status, created_at)
+           VALUES (?,?,?,?,?,?,?,?, 'Active', NOW())`,
+          [r.employee_id, note || 'One-time allowance', category || null, val, 0, 'Monthly', effFrom, effTo]
+        );
+      }
+    } else if (type === 'Reimbursement') {
+      const [Y, M] = month.split('-').map(Number);
+      for (const r of rows) {
+        const val = Number(calc(r.basic_salary).toFixed(2));
+        await conn.query(
+          `INSERT INTO reimbursements (employee_id, category, amount, month, year, approved_by, created_at)
+           VALUES (?,?,?,?,?,?, NOW())`,
+          [r.employee_id, category || 'Other', val, M, Y, req.user?.id || null]
+        );
+      }
+    } else {
+      throw new Error('Unsupported type');
+    }
+
+    // Single audit row for the batch
+    await conn.query(
+      `INSERT INTO audit_log (actor_user_id, action, entity, payload, created_at)
+       VALUES (?,?,?,?, NOW())`,
+      [
+        req.user?.id || null,
+        'COMPENSATION_APPLY',
+        'compensation_batch',
+        JSON.stringify({
+          type, mode, amount, percent, month, note,
+          employee_ids, at: new Date().toISOString()
+        })
+      ]
+    );
+
+    await conn.commit();
+    res.json({ ok:true, message:`Applied ${type} to ${employee_ids.length} employee(s)` });
+  } catch (err) {
+    await (conn?.rollback?.());
+    console.error('applyCompensation error:', err);
+    res.status(500).json({ ok:false, message:'Failed to apply compensation' });
+  } finally {
+    conn?.release?.();
+  }
+};
+
+
 /* ===================== LISTS (for grids) ===================== */
 
-// CLEAN + CONSISTENT: no inline SQL comments, always join employees and alias fields consistently
-async function listAllowances(req, res) {
+const listAllowances = async (req, res) => {
   try {
     const { employee_id } = req.query; // optional
     const [rows] = employee_id
@@ -13,7 +500,7 @@ async function listAllowances(req, res) {
           `
           SELECT 
             id, employee_id, 
-            name AS description,         -- alias for FE
+            name AS description,
             category, amount, taxable, frequency,
             effective_from, effective_to,
             status, created_at, updated_at
@@ -26,7 +513,7 @@ async function listAllowances(req, res) {
       : await pool.query(`
           SELECT 
             a.id, a.employee_id, 
-            a.name AS description,       -- alias for FE
+            a.name AS description,
             a.category, a.amount, a.taxable, a.frequency,
             a.effective_from, a.effective_to,
             a.status, a.created_at, a.updated_at,
@@ -40,32 +527,29 @@ async function listAllowances(req, res) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Failed to load allowances' });
   }
-}
+};
 
-async function listOvertime(req, res) {
+const listOvertime = async (req, res) => {
   try {
     const { employee_id } = req.query;
     const [rows] = employee_id
       ? await pool.query(
-          'SELECT * FROM overtime_adjustments WHERE employee_id=? ORDER BY created_at DESC',
+          `SELECT * FROM v_overtime_adjustments WHERE employee_id=? ORDER BY created_at DESC`,
           [employee_id]
         )
       : await pool.query(`
-          SELECT o.*, e.full_name
-          FROM overtime_adjustments o
-          JOIN employees e ON e.id=o.employee_id
-          ORDER BY o.created_at DESC
+          SELECT * FROM v_overtime_adjustments ORDER BY created_at DESC
         `);
     res.json({ ok: true, data: rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Failed to load overtime/adjustments' });
   }
-}
+};
 
 /* ===================== DEDUCTIONS ===================== */
 
-async function listDeductions(req, res) {
+const listDeductions = async (req, res) => {
   try {
     const { month, year } = req.query;
     let where = '1=1';
@@ -92,9 +576,9 @@ async function listDeductions(req, res) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Failed to load deductions' });
   }
-}
+};
 
-async function createDeduction(req, res) {
+const createDeduction = async (req, res) => {
   try {
     const {
       employee_id,
@@ -129,33 +613,29 @@ async function createDeduction(req, res) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Failed to save deduction' });
   }
-}
+};
 
-
-//get one deduction by id 
-
-async function getDeductionById(req, res) {
+// get one deduction by id
+const getDeductionById = async (req, res) => {
   try {
-    const {id} = req.params;
+    const { id } = req.params;
     const [[row]] = await pool.query(
-      `SELECT id, employee_id , name , type, basis , percent , amount , status , effective_date FROM deductions WHERE id=?`,
+      `SELECT id, employee_id, name, type, basis, percent, amount, status, effective_date
+         FROM deductions WHERE id=?`,
       [id]
-
-
     );
-    if (!row) return res.status(404).json({ok: false, message: 'Not Found'});
-    res.json({ok:true , data: row});
+    if (!row) return res.status(404).json({ ok: false, message: 'Not Found' });
+    res.json({ ok: true, data: row });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ok: false, message: 'Failed to load deduction'});
+    res.status(500).json({ ok: false, message: 'Failed to load deduction' });
   }
-  
-}
+};
 
-// update deduction 
-async function updateDeduction(req, res) {
+// update deduction
+const updateDeduction = async (req, res) => {
   try {
-    const {id} = req.params;
+    const { id } = req.params;
     const {
       employee_id,
       name,
@@ -165,15 +645,16 @@ async function updateDeduction(req, res) {
       amount,
       effective_date,
       status = 'Active',
-
     } = req.body;
 
     if (!employee_id || !name || !type || !basis || !effective_date) {
-      return res.status(400).json({ok: false, message: 'Missing required fields'})
+      return res.status(400).json({ ok: false, message: 'Missing required fields' });
     }
 
     await pool.query(
-      `UPDATE deductions SET employee_id=?, name=?, type=?,basis=?,percent=?, amount=?, effective_date=?,status=?,updated_at=NOW() WHERE id=?`,
+      `UPDATE deductions
+          SET employee_id=?, name=?, type=?, basis=?, percent=?, amount=?, effective_date=?, status=?, updated_at=NOW()
+        WHERE id=?`,
       [
         employee_id,
         name,
@@ -187,39 +668,35 @@ async function updateDeduction(req, res) {
       ]
     );
 
-    res.json({ok: true, message: 'Deduction Updated'});
-
+    res.json({ ok: true, message: 'Deduction Updated' });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ok: false, message: 'Failed to Update deduction'});
+    res.status(500).json({ ok: false, message: 'Failed to Update deduction' });
   }
+};
 
-}
-
-//delete deduction
-
-async function deleteDeduction(req, res) {
+// delete deduction
+const deleteDeduction = async (req, res) => {
   try {
-    const {id} = req.params;
+    const { id } = req.params;
     await pool.query('DELETE FROM deductions WHERE id=?', [id]);
-    res.json({ok: true , message: 'Deduction deleted'});
+    res.json({ ok: true, message: 'Deduction deleted' });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ok: false, message: 'Failed to delete deduction'});
+    res.status(500).json({ ok: false, message: 'Failed to delete deduction' });
   }
-  
-}
+};
 
 /* ========== BASIC SALARY (also used by percent preview) ========== */
 
-async function getBasicSalary(req, res) {
+const getBasicSalary = async (req, res) => {
   const { employee_id } = req.query;
   if (!employee_id) return res.status(400).json({ ok: false, message: 'employee_id required' });
   const [[row]] = await pool.query('SELECT basic_salary FROM salaries WHERE employee_id=?', [employee_id]);
   res.json({ basic_salary: row?.basic_salary || 0 });
-}
+};
 
-async function setBasicSalary(req, res) {
+const setBasicSalary = async (req, res) => {
   const { employee_id, basic_salary } = req.body;
   if (!employee_id || basic_salary == null) {
     return res.status(400).json({ ok: false, message: 'employee_id and basic_salary required' });
@@ -231,20 +708,16 @@ async function setBasicSalary(req, res) {
     [employee_id, basic_salary]
   );
   res.json({ ok: true, message: 'Basic salary set' });
-}
+};
 
 /* ===================== CREATES (forms) ===================== */
 
-/**
- * Add Allowance
- * Accepts: employee_id, description, category, amount, taxable, frequency, effective_from, effective_to, status
- * DB: stores description -> name (no migration needed)
- */
-async function addAllowance(req, res) {
+// Add Allowance
+const addAllowance = async (req, res) => {
   try {
     const {
       employee_id,
-      description,                 // NEW (mapped to DB column `name`)
+      description,                 // mapped to DB column `name`
       category = null,
       amount,
       taxable = 0,
@@ -270,18 +743,11 @@ async function addAllowance(req, res) {
     console.error(err);
     res.status(500).json({ ok: false, message: 'Failed to add allowance' });
   }
-}
+};
 
-async function addOvertimeAdjustment(req, res) {
-  const { employee_id, category, amount, tax_treatment, effective_date, frequency, status = 'Approved' } = req.body;
-  await pool.query(
-    'INSERT INTO overtime_adjustments (employee_id, category, amount, tax_treatment, effective_date, frequency, status, created_at) VALUES (?,?,?,?,?,?,?, NOW())',
-    [employee_id, category, amount, tax_treatment, effective_date, frequency, status]
-  );
-  res.json({ ok: true, message: 'Overtime/Adjustment added' });
-}
+// (Removed old addOvertimeAdjustment that referenced non-existent columns)
 
-async function addBonus(req, res) {
+const addBonus = async (req, res) => {
   const { employee_id, amount, reason, effective_date } = req.body;
   if (!employee_id || !amount || !effective_date)
     return res.status(400).json({ ok: false, message: 'employee_id, amount, effective_date required' });
@@ -291,11 +757,11 @@ async function addBonus(req, res) {
     [employee_id, amount, reason || null, effective_date, req.user?.id || null]
   );
   res.json({ ok: true, message: 'Bonus added' });
-}
+};
 
 /* ===================== EARNINGS GRID ===================== */
 
-async function listEarnings(req, res) {
+const listEarnings = async (req, res) => {
   const { month, year } = req.query; // optional
   const [emps] = await pool.query(`
     SELECT e.id, e.full_name, d.name AS department, s.basic_salary
@@ -305,11 +771,16 @@ async function listEarnings(req, res) {
     WHERE e.status='Active'
   `);
 
+
+
+
+  // **************************************************
+  
   // Build allowance/overtime/bonus maps with optional period filter
   const params = [];
   let allowWhere = "WHERE status='Active'";
-  let otWhere = "WHERE status='Approved'";
-  let bonusWhere = "WHERE 1=1";
+  let otWhere = 'WHERE 1=1'; // created_at based
+  let bonusWhere = 'WHERE 1=1';
 
   if (month && year) {
     // Use effective_from/effective_to for allowances period inclusion
@@ -322,19 +793,22 @@ async function listEarnings(req, res) {
     allowWhere += ' AND (effective_to IS NULL OR effective_to >= ?)';
     params.push(lastStr, firstStr);
 
-    otWhere += ' AND MONTH(effective_date)=? AND YEAR(effective_date)=?';
+    otWhere += ' AND MONTH(created_at)=? AND YEAR(created_at)=?';
     bonusWhere += ' AND MONTH(effective_date)=? AND YEAR(effective_date)=?';
     params.push(Number(month), Number(year), Number(month), Number(year));
   }
 
   const [allowMapRows] = await pool.query(
     `SELECT employee_id, SUM(amount) AS total FROM allowances ${allowWhere} GROUP BY employee_id`,
-    params.slice(0, allowWhere.includes('?') ? 2 : 0) // only first two params belong to allowances
+    params.slice(0, allowWhere.includes('?') ? 2 : 0)
   );
 
   const restParams = month && year ? [Number(month), Number(year)] : [];
   const [otMapRows] = await pool.query(
-    `SELECT employee_id, SUM(amount) AS total FROM overtime_adjustments ${otWhere} GROUP BY employee_id`,
+    `SELECT employee_id, SUM(ot_hours * ot_rate) AS total
+       FROM overtime_adjustments
+      ${otWhere}
+      GROUP BY employee_id`,
     restParams
   );
   const [bonusMapRows] = await pool.query(
@@ -364,11 +838,11 @@ async function listEarnings(req, res) {
   });
 
   res.json({ ok: true, data });
-}
+};
 
 /* ===================== MONTH SUMMARY & RUN ===================== */
 
-async function monthSummary(req, res) {
+const monthSummary = async (req, res) => {
   const { month, year } = req.query;
   if (!month || !year) return res.status(400).json({ ok:false, message:'month, year required' });
 
@@ -395,14 +869,15 @@ async function monthSummary(req, res) {
     GROUP BY employee_id
   `, [lastStr, firstStr]);
 
-  // Overtime/Bonuses strictly in the month
+  // Overtime strictly in the month (by created_at) — amount = hours * rate
   const [otRows] = await pool.query(`
-    SELECT employee_id, SUM(amount) AS total
+    SELECT employee_id, SUM(ot_hours * ot_rate) AS total
     FROM overtime_adjustments
-    WHERE status='Approved' AND MONTH(effective_date)=? AND YEAR(effective_date)=?
+    WHERE MONTH(created_at)=? AND YEAR(created_at)=?
     GROUP BY employee_id
   `, [Number(month), Number(year)]);
 
+  // Bonuses strictly in the month
   const [bonusRows] = await pool.query(`
     SELECT employee_id, SUM(amount) AS total
     FROM bonuses
@@ -410,6 +885,7 @@ async function monthSummary(req, res) {
     GROUP BY employee_id
   `, [Number(month), Number(year)]);
 
+  // Deductions up to that month (same logic you had)
   const [dedRows] = await pool.query(`
     SELECT employee_id, SUM(
       CASE WHEN basis='Percent' AND percent IS NOT NULL
@@ -434,9 +910,9 @@ async function monthSummary(req, res) {
   });
 
   res.json({ ok:true, data });
-}
+};
 
-async function runPayrollForMonth(req, res) {
+const runPayrollForMonth = async (req, res) => {
   const { month, year } = req.body;
   if (!month || !year) return res.status(400).json({ ok:false, message:'month, year required' });
 
@@ -464,11 +940,11 @@ async function runPayrollForMonth(req, res) {
   }
 
   res.json({ ok:true, message: `Payroll run stored for ${month}/${year}`, count: data.length });
-}
+};
 
 /* ===================== PAYSLIP ===================== */
 
-async function generatePayslip(req, res) {
+const generatePayslip = async (req, res) => {
   const { employee_id, month, year } = req.query;
   if (!employee_id || !month || !year) {
     return res.status(400).json({ ok: false, message: 'employee_id, month, year required' });
@@ -478,20 +954,56 @@ async function generatePayslip(req, res) {
   if (!emp) return res.status(404).json({ ok: false, message: 'Employee not found' });
 
   const [[salary]] = await pool.query('SELECT basic_salary FROM salaries WHERE employee_id=?', [employee_id]);
-  const [allowances] = await pool.query('SELECT * FROM allowances WHERE employee_id=?', [employee_id]);
-  const [deductions] = await pool.query('SELECT * FROM deductions WHERE employee_id=?', [employee_id]);
-  const [adjustments] = await pool.query('SELECT * FROM overtime_adjustments WHERE employee_id=?', [employee_id]);
 
-  const gross = (salary?.basic_salary || 0)
-    + allowances.reduce((a, b) => a + Number(b.amount || 0), 0)
-    + adjustments.reduce((a, b) => a + Number(b.amount || 0), 0);
+  // Allowances active in the month
+  const first = new Date(Number(year), Number(month) - 1, 1);
+  const last = new Date(Number(year), Number(month), 0);
+  const firstStr = first.toISOString().slice(0,10);
+  const lastStr = last.toISOString().slice(0,10);
 
-  const totalDeductions = deductions.reduce((a, b) => a + Number(b.amount || 0), 0);
-  const net = gross - totalDeductions;
+  const [allowances] = await pool.query(
+    `SELECT name, amount FROM allowances
+      WHERE employee_id=? AND status='Active'
+        AND (effective_from IS NULL OR effective_from <= ?)
+        AND (effective_to IS NULL OR effective_to >= ?)`,
+    [employee_id, lastStr, firstStr]
+  );
+
+  const [deductions] = await pool.query(
+    `SELECT name, basis, percent, amount
+       FROM deductions
+      WHERE employee_id=? AND status='Active'
+        AND MONTH(effective_date)<=? AND YEAR(effective_date)<=?`,
+    [employee_id, Number(month), Number(year)]
+  );
+
+  // Overtime in the month (by created_at)
+  const [otRows] = await pool.query(
+    `SELECT ot_hours, ot_rate, adjustment_reason, created_at
+       FROM overtime_adjustments
+      WHERE employee_id=? AND MONTH(created_at)=? AND YEAR(created_at)=?`
+    , [employee_id, Number(month), Number(year)]
+  );
+
+  const otTotal = otRows.reduce((a, r) => a + Number(r.ot_hours || 0) * Number(r.ot_rate || 0), 0);
+  const basic = Number(salary?.basic_salary || 0);
+  const allowTotal = allowances.reduce((a, b) => a + Number(b.amount || 0), 0);
+
+  const dedTotal = await (async () => {
+    let sum = 0;
+    for (const d of deductions) {
+      if (d.basis === 'Percent' && d.percent != null) sum += (Number(d.percent) / 100) * basic;
+      else sum += Number(d.amount || 0);
+    }
+    return sum;
+  })();
+
+  const gross = basic + allowTotal + otTotal;
+  const net = gross - dedTotal;
 
   await pool.query(
     'INSERT INTO payroll_cycles (employee_id, period_month, period_year, gross_earnings, total_deductions, net_salary, generated_at) VALUES (?,?,?,?,?,?, NOW())',
-    [employee_id, month, year, gross, totalDeductions, net]
+    [employee_id, month, year, gross, dedTotal, net]
   );
 
   const doc = new PDFDocument();
@@ -505,20 +1017,35 @@ async function generatePayslip(req, res) {
   doc.text(`Email: ${emp.email}`);
   doc.text(`Period: ${month}/${year}`);
   doc.moveDown();
-  doc.text(`Basic Salary: $${salary?.basic_salary || 0}`);
-  allowances.forEach(a => doc.text(`Allowance - ${a.name}: $${a.amount}`));
-  adjustments.forEach(a => doc.text(`Overtime/Adj - ${a.category}: $${a.amount}`));
-  deductions.forEach(d => doc.text(`Deduction - ${d.name}: -$${d.amount}`));
+  doc.text(`Basic Salary: ${basic.toFixed(2)}`);
+  allowances.forEach(a => doc.text(`Allowance - ${a.name}: ${Number(a.amount).toFixed(2)}`));
+  otRows.forEach(o => doc.text(`Overtime - ${Number(o.ot_hours)}h × ${Number(o.ot_rate).toFixed(2)} = ${(Number(o.ot_hours)*Number(o.ot_rate)).toFixed(2)}${o.adjustment_reason ? ` (${o.adjustment_reason})` : ''}`));
+  deductions.forEach(d => {
+    if (d.basis === 'Percent' && d.percent != null) {
+      doc.text(`Deduction - ${d.name} (${Number(d.percent)}% of basic): -${((Number(d.percent)/100)*basic).toFixed(2)}`);
+    } else {
+      doc.text(`Deduction - ${d.name}: -${Number(d.amount || 0).toFixed(2)}`);
+    }
+  });
   doc.moveDown();
-  doc.text(`Gross: $${gross}`);
-  doc.text(`Total Deductions: $${totalDeductions}`);
-  doc.text(`Net Salary: $${net}`, { underline: true });
+  doc.text(`Gross: ${gross.toFixed(2)}`);
+  doc.text(`Total Deductions: ${dedTotal.toFixed(2)}`);
+  doc.text(`Net Salary: ${net.toFixed(2)}`, { underline: true });
   doc.end();
-}
+};
 
 /* ===================== EXPORTS ===================== */
 
 module.exports = {
+  // OT API
+  getGrades,
+  getOvertimeRulesByGrade,
+  upsertOvertimeRules,
+  searchEmployees,
+  createOvertimeAdjustment,
+  listOvertimeAdjustmentsByGrade,
+  listOvertimeAdjustmentsByEmployee,
+
   // lists
   listAllowances,
   listDeductions,
@@ -527,15 +1054,12 @@ module.exports = {
   // creates
   createDeduction,
   addAllowance,
-  addOvertimeAdjustment,
   addBonus,
 
-  //single item ops for deductions 
+  // single item ops for deductions
   getDeductionById,
   updateDeduction,
   deleteDeduction,
-
-
 
   // salary helpers
   setBasicSalary,
@@ -548,4 +1072,11 @@ module.exports = {
 
   // payslip
   generatePayslip,
+
+    // NEW: compensation + search
+  searchEmployeesAdvanced,
+  listDepartments,
+  previewCompensation,
+  applyCompensation,
+
 };
