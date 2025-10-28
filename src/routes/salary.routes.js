@@ -7,6 +7,17 @@ const router = express.Router();
 // protect all salary endpoints
 router.use(requireAuth, requireRole('HR'));
 
+// overtime rule + adjustment 
+router.get('/grades', ctrl.getGrades);
+
+//rule 
+router.get('/overtime/rules/:gradeId', ctrl.getOvertimeRulesByGrade);
+//router.post('/overtime/rules', ctrl.upsertOvertimeRule);
+
+//adjustemnts
+router.get('/overtime/adjustments/grade/:gradeId', ctrl.listOvertimeAdjustmentsByGrade);
+router.post('/overtime/adjustments', ctrl.createOvertimeAdjustment);
+
 // basic salary
 router.post('/basic', ctrl.setBasicSalary);
 router.get('/basic', ctrl.getBasicSalary);
@@ -24,8 +35,16 @@ router.put('/deductions/:id', ctrl.updateDeduction);
 router.delete('/deductions/:id', ctrl.deleteDeduction);
 
 // overtime / adjustments
-router.post('/overtime', ctrl.addOvertimeAdjustment);
-router.get('/overtime', ctrl.listOvertime);
+
+//compensation 
+// --- Employees advanced search + departments ---
+router.get('/employees', ctrl.searchEmployeesAdvanced);
+router.get('/departments', ctrl.listDepartments);
+
+// --- Compensation (preview & apply) ---
+router.post('/compensation/preview', ctrl.previewCompensation);
+router.post('/compensation/apply',   ctrl.applyCompensation);
+
 
 // bonuses
 router.post('/bonus', ctrl.addBonus);
