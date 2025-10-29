@@ -88,7 +88,7 @@ const getOvertimeRulesByGrade = async (req, res) => {
 };
 //****************************************************** */
 // === Upsert overtime rule for a grade (create or update current)
-const upsertOvertimeRules = async (req, res) => {
+const upsertOvertimeRule = async (req, res) => {
   try {
     const { grade_id, ot_rate, max_ot_hours } = req.body;
     if (!grade_id || ot_rate == null || max_ot_hours == null) {
@@ -687,6 +687,12 @@ const deleteDeduction = async (req, res) => {
   }
 };
 
+
+//***************************************************** */
+
+// allowances ================================================
+
+
 /* ========== BASIC SALARY (also used by percent preview) ========== */
 
 const getBasicSalary = async (req, res) => {
@@ -842,75 +848,146 @@ const listEarnings = async (req, res) => {
 
 /* ===================== MONTH SUMMARY & RUN ===================== */
 
+// ===================== MONTH SUMMARY & RUN =====================
+// CHANGE: robust version that avoids large "IN (...)" lists and still supports filters.
+//         We pull the filtered employees, then aggregate month-wide and pick from maps.
 const monthSummary = async (req, res) => {
-  const { month, year } = req.query;
+  const { month, year, q = '', department_id, department, grade_id, grade } = req.query;
   if (!month || !year) return res.status(400).json({ ok:false, message:'month, year required' });
 
-  const [earnings] = await pool.query(`
-    SELECT e.id AS employee_id, s.basic_salary
-    FROM employees e
-    LEFT JOIN salaries s ON s.employee_id = e.id
-    WHERE e.status='Active'
-  `);
+  try {
+    // --- Filters for EMPLOYEE list
+    const clauses = ['e.status = "Active"'];
+    const params  = [];
 
-  // Period bounds
-  const first = new Date(Number(year), Number(month) - 1, 1);
-  const last = new Date(Number(year), Number(month), 0);
-  const firstStr = first.toISOString().slice(0,10);
-  const lastStr = last.toISOString().slice(0,10);
+    if (q) { clauses.push('(e.full_name LIKE ? OR e.employee_code LIKE ? OR CAST(e.id AS CHAR) LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
+    if (department_id) { clauses.push('e.department_id = ?'); params.push(Number(department_id)); }
+    if (department)    { clauses.push('d.name LIKE ?');       params.push(`%${department}%`); }
+    if (grade_id)      { clauses.push('e.grade_id = ?');      params.push(Number(grade_id)); }
+    if (grade)         { clauses.push('g.grade_name = ?');    params.push(grade); }
 
-  // Allowances active within the month
-  const [allowRows] = await pool.query(`
-    SELECT employee_id, SUM(amount) AS total
-    FROM allowances
-    WHERE status='Active'
-      AND (effective_from IS NULL OR effective_from <= ?)
-      AND (effective_to IS NULL OR effective_to >= ?)
-    GROUP BY employee_id
-  `, [lastStr, firstStr]);
+    const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-  // Overtime strictly in the month (by created_at) — amount = hours * rate
-  const [otRows] = await pool.query(`
-    SELECT employee_id, SUM(ot_hours * ot_rate) AS total
-    FROM overtime_adjustments
-    WHERE MONTH(created_at)=? AND YEAR(created_at)=?
-    GROUP BY employee_id
-  `, [Number(month), Number(year)]);
+    // Pull filtered employees with identity/org/basic salary
+    const [emps] = await pool.query(`
+      SELECT 
+        e.id                AS employee_id,
+        e.employee_code,
+        e.full_name,
+        e.grade_id,
+        g.grade_name,
+        d.name              AS department_name,
+        s.basic_salary
+      FROM employees e
+      LEFT JOIN departments d ON d.id = e.department_id
+      LEFT JOIN grades g      ON g.grade_id = e.grade_id
+      LEFT JOIN salaries s    ON s.employee_id = e.id
+      ${whereSql}
+      ORDER BY e.full_name
+    `, params);
 
-  // Bonuses strictly in the month
-  const [bonusRows] = await pool.query(`
-    SELECT employee_id, SUM(amount) AS total
-    FROM bonuses
-    WHERE MONTH(effective_date)=? AND YEAR(effective_date)=?
-    GROUP BY employee_id
-  `, [Number(month), Number(year)]);
+    if (!emps.length) return res.json({ ok:true, data: [] });
 
-  // Deductions up to that month (same logic you had)
-  const [dedRows] = await pool.query(`
-    SELECT employee_id, SUM(
-      CASE WHEN basis='Percent' AND percent IS NOT NULL
-           THEN (percent/100.0) * COALESCE((SELECT basic_salary FROM salaries WHERE employee_id=deductions.employee_id LIMIT 1), 0)
-           ELSE amount
-      END
-    ) AS total
-    FROM deductions
-    WHERE status='Active' AND MONTH(effective_date)<=? AND YEAR(effective_date)<=?
-    GROUP BY employee_id
-  `, [Number(month), Number(year)]);
+    // --- Time bounds for the selected month
+    const first = new Date(Number(year), Number(month) - 1, 1);
+    const last  = new Date(Number(year), Number(month), 0);
+    const firstStr = first.toISOString().slice(0,10);
+    const lastStr  = last.toISOString().slice(0,10);
 
-  const map = r => r.reduce((m, x) => (m[x.employee_id] = Number(x.total||0), m), {});
-  const A = map(allowRows), O = map(otRows), B = map(bonusRows), D = map(dedRows);
+    // --- Build ID set for fast lookups (not used in SQL; we’ll filter in JS)
+    const idSet = new Set(emps.map(e => e.employee_id));
 
-  const data = earnings.map(e => {
-    const basic = Number(e.basic_salary||0);
-    const gross = basic + (A[e.employee_id]||0) + (O[e.employee_id]||0) + (B[e.employee_id]||0);
-    const totalDeductions = D[e.employee_id] || 0;
-    const net = gross - totalDeductions;
-    return { employee_id: e.employee_id, basic, allowances:A[e.employee_id]||0, overtime:O[e.employee_id]||0, bonus:B[e.employee_id]||0, gross, totalDeductions, net };
-  });
+    // --- Aggregations (month-wide), then filter in JS
 
-  res.json({ ok:true, data });
+    // Allowances active in the month (period-inclusive)
+    const [allowAll] = await pool.query(`
+      SELECT employee_id, SUM(amount) AS total
+      FROM allowances
+      WHERE status='Active'
+        AND (effective_from IS NULL OR effective_from <= ?)
+        AND (effective_to   IS NULL OR effective_to   >= ?)
+      GROUP BY employee_id
+    `, [lastStr, firstStr]);
+
+    // Overtime strictly in the month (by created_at)
+    const [otAll] = await pool.query(`
+      SELECT employee_id, SUM(ot_hours * ot_rate) AS total
+      FROM overtime_adjustments
+      WHERE MONTH(created_at)=? AND YEAR(created_at)=?
+      GROUP BY employee_id
+    `, [Number(month), Number(year)]);
+
+    // Bonuses effective in the month
+    const [bonusAll] = await pool.query(`
+      SELECT employee_id, SUM(amount) AS total
+      FROM bonuses
+      WHERE MONTH(effective_date)=? AND YEAR(effective_date)=?
+      GROUP BY employee_id
+    `, [Number(month), Number(year)]);
+
+    // Deductions up to that month/year (same logic)
+    const [dedAll] = await pool.query(`
+      SELECT employee_id, SUM(
+        CASE WHEN basis='Percent' AND percent IS NOT NULL
+             THEN (percent/100.0) * COALESCE((SELECT basic_salary FROM salaries WHERE employee_id=deductions.employee_id LIMIT 1), 0)
+             ELSE amount
+        END
+      ) AS total
+      FROM deductions
+      WHERE status='Active'
+        AND MONTH(effective_date)<=? AND YEAR(effective_date)<=?
+      GROUP BY employee_id
+    `, [Number(month), Number(year)]);
+
+    // Convert rows to maps and keep only the filtered employees
+    const toMap = (rows) => {
+      const m = Object.create(null);
+      for (const r of rows) {
+        if (idSet.has(r.employee_id)) m[r.employee_id] = Number(r.total || 0);
+      }
+      return m;
+    };
+    const A = toMap(allowAll);
+    const O = toMap(otAll);
+    const B = toMap(bonusAll);
+    const D = toMap(dedAll);
+
+    // Compose final dataset
+    const data = emps.map(e => {
+      const basic       = Number(e.basic_salary || 0);
+      const allowances  = A[e.employee_id] || 0;
+      const overtime    = O[e.employee_id] || 0;
+      const bonus       = B[e.employee_id] || 0;
+      const gross       = basic + allowances + overtime + bonus;
+      const totalDeductions = D[e.employee_id] || 0;
+      const net         = gross - totalDeductions;
+
+      return {
+        employee_id     : e.employee_id,
+        employee_code   : e.employee_code,
+        full_name       : e.full_name,
+        department_name : e.department_name || '',
+        grade_id        : e.grade_id,
+        grade_name      : e.grade_name || '',
+        basic,
+        allowances,
+        overtime,
+        bonus,
+        gross,
+        totalDeductions,
+        net
+      };
+    });
+
+    res.json({ ok:true, data });
+  } catch (err) {
+    console.error('monthSummary error:', err);
+    res.status(500).json({ ok:false, message:'Failed to build month summary' });
+  }
 };
+
+
+//=======================================================
 
 const runPayrollForMonth = async (req, res) => {
   const { month, year } = req.body;
@@ -1040,7 +1117,8 @@ module.exports = {
   // OT API
   getGrades,
   getOvertimeRulesByGrade,
-  upsertOvertimeRules,
+  gradeNameOf,
+  upsertOvertimeRule,
   searchEmployees,
   createOvertimeAdjustment,
   listOvertimeAdjustmentsByGrade,

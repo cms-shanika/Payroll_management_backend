@@ -12,7 +12,7 @@ router.get('/grades', ctrl.getGrades);
 
 //rule 
 router.get('/overtime/rules/:gradeId', ctrl.getOvertimeRulesByGrade);
-//router.post('/overtime/rules', ctrl.upsertOvertimeRule);
+router.post('/overtime/rules', ctrl.upsertOvertimeRule);
 
 //adjustemnts
 router.get('/overtime/adjustments/grade/:gradeId', ctrl.listOvertimeAdjustmentsByGrade);
