@@ -751,6 +751,108 @@ const addAllowance = async (req, res) => {
   }
 };
 
+// ===================== ALLOWANCE CRUD METHODS =====================
+// ADD THESE METHODS AFTER addAllowance AND BEFORE addBonus
+
+// Get allowance by ID
+const getAllowanceById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const [[allowance]] = await pool.query(
+      `SELECT 
+         a.id, a.employee_id, 
+         a.name AS description,
+         a.category, a.amount, a.taxable, a.frequency,
+         a.effective_from, a.effective_to,
+         a.status, a.created_at, a.updated_at,
+         e.full_name
+       FROM allowances a
+       JOIN employees e ON e.id = a.employee_id
+       WHERE a.id = ?`,
+      [id]
+    );
+    
+    if (!allowance) {
+      return res.status(404).json({ ok: false, message: 'Allowance not found' });
+    }
+    
+    res.json({ ok: true, data: allowance });
+  } catch (err) {
+    console.error('getAllowanceById error:', err);
+    res.status(500).json({ ok: false, message: 'Failed to fetch allowance' });
+  }
+};
+
+// Update allowance
+const updateAllowance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      employee_id,
+      description,
+      category = null,
+      amount,
+      taxable = 0,
+      frequency = 'Monthly',
+      effective_from = null,
+      effective_to = null,
+      status = 'Active',
+    } = req.body;
+
+    if (!employee_id || !description || amount == null) {
+      return res.status(400).json({ ok: false, message: 'employee_id, description, amount are required' });
+    }
+
+    const [result] = await pool.query(
+      `UPDATE allowances 
+       SET employee_id = ?, name = ?, category = ?, amount = ?, 
+           taxable = ?, frequency = ?, effective_from = ?, effective_to = ?, 
+           status = ?, updated_at = NOW()
+       WHERE id = ?`,
+      [
+        employee_id, 
+        description, 
+        category, 
+        amount, 
+        Number(taxable) ? 1 : 0, 
+        frequency, 
+        effective_from, 
+        effective_to, 
+        status, 
+        id
+      ]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ ok: false, message: 'Allowance not found' });
+    }
+
+    res.json({ ok: true, message: 'Allowance updated successfully' });
+  } catch (err) {
+    console.error('updateAllowance error:', err);
+    res.status(500).json({ ok: false, message: 'Failed to update allowance' });
+  }
+};
+
+// Delete allowance
+const deleteAllowance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const [result] = await pool.query('DELETE FROM allowances WHERE id = ?', [id]);
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ ok: false, message: 'Allowance not found' });
+    }
+    
+    res.json({ ok: true, message: 'Allowance deleted successfully' });
+  } catch (err) {
+    console.error('deleteAllowance error:', err);
+    res.status(500).json({ ok: false, message: 'Failed to delete allowance' });
+  }
+};
+
 // (Removed old addOvertimeAdjustment that referenced non-existent columns)
 
 const addBonus = async (req, res) => {
@@ -1132,6 +1234,9 @@ module.exports = {
   // creates
   createDeduction,
   addAllowance,
+  getAllowanceById,
+  updateAllowance,
+  deleteAllowance,
   addBonus,
 
   // single item ops for deductions
@@ -1156,5 +1261,7 @@ module.exports = {
   listDepartments,
   previewCompensation,
   applyCompensation,
+
+
 
 };
