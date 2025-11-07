@@ -12,7 +12,7 @@ router.get('/grades', ctrl.getGrades);
 
 //rule 
 router.get('/overtime/rules/:gradeId', ctrl.getOvertimeRulesByGrade);
-//router.post('/overtime/rules', ctrl.upsertOvertimeRule);
+router.post('/overtime/rules', ctrl.upsertOvertimeRule);
 
 //adjustemnts
 router.get('/overtime/adjustments/grade/:gradeId', ctrl.listOvertimeAdjustmentsByGrade);
@@ -25,6 +25,9 @@ router.get('/basic', ctrl.getBasicSalary);
 // allowances
 router.post('/allowance', ctrl.addAllowance);
 router.get('/allowances', ctrl.listAllowances);
+router.get('/allowance/:id', ctrl.getAllowanceById);        // ADD THIS
+router.put('/allowance/:id', ctrl.updateAllowance);         // ADD THIS  
+router.delete('/allowance/:id', ctrl.deleteAllowance);      // ADD THIS
 
 // deductions
 router.get('/deductions', ctrl.listDeductions);
