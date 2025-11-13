@@ -36,6 +36,8 @@ app.use('/api/salary', salaryRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/reports', reportRoutes);
 
+app.use('/api/attendance', attendanceRoutes);
+
 app.get('/health', (_req, res) => res.json({ ok:true, status:'UP' }));
 app.use((req,res)=>res.status(404).json({ ok:false, message: 'Route not found'}));
 
