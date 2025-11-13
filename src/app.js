@@ -10,7 +10,7 @@ const authRoutes = require('./routes/auth.routes');
 const employeeRoutes = require('./routes/employee.routes');
 const salaryRoutes = require('./routes/salary.routes');
 const departmentRoutes = require('./routes/department.routes');
-const attendanceRoutes = require('./routes/attendance.routes');
+const reportRoutes = require('./routes/report.route')
 
 const app = express();
 
@@ -34,6 +34,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/salary', salaryRoutes);
 app.use('/api/departments', departmentRoutes);
+app.use('/api/reports', reportRoutes);
 
 app.use('/api/attendance', attendanceRoutes);
 
