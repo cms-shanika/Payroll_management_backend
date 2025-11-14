@@ -1,3 +1,4 @@
+// src/controllers/leave.controller.js
 const pool = require('../config/db');
 const dayjs = require('dayjs');
 
@@ -108,7 +109,7 @@ exports.decideRequest = async (req, res) => {
     [newStatus, req.user.id, note || null, id]
   );
 
-  // Optional: update leave_balances on approve
+  // Update leave_balances on approve
   if (action === 'APPROVE') {
     const year = dayjs(lr.start_date).year();
     await pool.query(
@@ -123,12 +124,8 @@ exports.decideRequest = async (req, res) => {
 };
 
 exports.statusList = async (req, res) => {
-  // Same list as Request, but return extra counters for the top widgets
-  const { from, to } = req.query;
-
-  // list
-  await exports.listRequests(req, res);  // re-use the above handler by calling it
-  
+  // Re-use listRequests for now
+  await exports.listRequests(req, res);
 };
 
 exports.calendarFeed = async (req, res) => {
@@ -146,7 +143,6 @@ exports.calendarFeed = async (req, res) => {
     [from, to]
   );
 
-  // Simple calendar event format
   const events = rows.map(r => ({
     id: r.id,
     title: `${r.full_name} - ${r.leave_type}`,
@@ -162,7 +158,6 @@ exports.calendarFeed = async (req, res) => {
 exports.summary = async (req, res) => {
   const year = parseInt(req.query.year || String(dayjs().year()), 10);
 
-  // usage by type
   const [byType] = await pool.query(
     `SELECT lt.name AS leave_type, SUM(lr.duration_hours) AS hours
      FROM leave_requests lr
@@ -173,7 +168,6 @@ exports.summary = async (req, res) => {
     [year]
   );
 
-  // employees currently on leave today
   const today = dayjs().format('YYYY-MM-DD');
   const [[{ onLeaveToday }]] = await pool.query(
     `SELECT COUNT(*) AS onLeaveToday
@@ -188,4 +182,78 @@ exports.summary = async (req, res) => {
     onLeaveToday,
     byType
   });
+};
+
+// 🔹 NEW: Employee leave balances for EmployeeLeaves.jsx
+exports.employeeBalances = async (req, res) => {
+  try {
+    const year = parseInt(req.query.year || String(dayjs().year()), 10);
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '50', 10)));
+    const offset = (page - 1) * pageSize;
+
+    const { department_id, search } = req.query;
+
+    const filters = [];
+    const params = [];
+
+    if (department_id) {
+      filters.push('e.department_id = ?');
+      params.push(Number(department_id));
+    }
+    if (search) {
+      filters.push('(e.full_name LIKE ? OR e.employee_code LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`);
+    }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+
+    const [rows] = await pool.query(
+      `SELECT
+          e.id AS employee_id,
+          e.employee_code,
+          e.full_name,
+          COALESCE(d.name, e.department_name) AS department_name,
+          SUM(CASE WHEN lt.name = 'Personal' THEN lb.used_days ELSE 0 END) AS annualUsed,
+          SUM(CASE WHEN lt.name = 'Personal' THEN lb.entitled_days ELSE 0 END) AS annualTotal,
+          SUM(CASE WHEN lt.name = 'Sick' THEN lb.used_days ELSE 0 END) AS casualUsed,
+          SUM(CASE WHEN lt.name = 'Sick' THEN lb.entitled_days ELSE 0 END) AS casualTotal
+       FROM employees e
+       LEFT JOIN departments d ON d.id = e.department_id
+       LEFT JOIN leave_balances lb
+         ON lb.employee_id = e.id AND lb.year = ?
+       LEFT JOIN leave_types lt
+         ON lt.id = lb.leave_type_id
+       ${where}
+       GROUP BY e.id, e.employee_code, e.full_name, d.name, e.department_name
+       ORDER BY e.full_name ASC
+       LIMIT ? OFFSET ?`,
+      [year, ...params, pageSize, offset]
+    );
+
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS count
+       FROM employees e
+       ${where}`,
+      params
+    );
+    const total = countRows[0]?.count || 0;
+
+    const data = rows.map(r => ({
+      employee_id: r.employee_id,
+      employee_code: r.employee_code,
+      name: r.full_name,
+      department: r.department_name || 'N/A',
+      annualUsed: Number(r.annualUsed || 0),
+      annualTotal: Number(r.annualTotal || 0),
+      casualUsed: Number(r.casualUsed || 0),
+      casualTotal: Number(r.casualTotal || 0),
+      halfDay1: '0 / 0',
+      halfDay2: '0 / 0',
+    }));
+
+    res.json({ ok:true, page, pageSize, total, data, year });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok:false, message: err.message });
+  }
 };
