@@ -10,7 +10,9 @@ const authRoutes = require('./routes/auth.routes');
 const employeeRoutes = require('./routes/employee.routes');
 const salaryRoutes = require('./routes/salary.routes');
 const departmentRoutes = require('./routes/department.routes');
-const reportRoutes = require('./routes/report.route')
+const reportRoutes = require('./routes/report.route');
+const attendanceRoutes = require('./routes/attendance.routes');
+
 
 const app = express();
 
