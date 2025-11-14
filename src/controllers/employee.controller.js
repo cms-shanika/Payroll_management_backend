@@ -5,6 +5,7 @@ const fs = require('fs');
 const logAudit = require('../utils/audit');
 const logEvent = require('../utils/event');
 
+
 function baseUrl(req) {
   return process.env.BACKEND_PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
 }
