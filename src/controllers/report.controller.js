@@ -1,13 +1,13 @@
+const { level } = require('winston');
 const pool = require('../config/db');
+const logEvent = require('../utils/event');
 
 const getMonthlyTotalData = async (req, res) => {
   try {
-    // Get month/year/departmentId from query or default to current
     const month = parseInt(req.query.month, 10) || new Date().getMonth() + 1;
     const year = parseInt(req.query.year, 10) || new Date().getFullYear();
     const departmentId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
 
-    // Base SQL query
     let sql = `
       SELECT 
         SUM(total_net_salary) AS net_salary,
@@ -18,10 +18,7 @@ const getMonthlyTotalData = async (req, res) => {
       FROM department_financial_summary
       WHERE period_month = ? AND period_year = ?
     `;
-
     const params = [month, year];
-
-    // Add department filter if provided
     if (departmentId) {
       sql += ` AND department_id = ?`;
       params.push(departmentId);
@@ -41,10 +38,12 @@ const getMonthlyTotalData = async (req, res) => {
 
   } catch (err) {
     console.error("Error in getMonthlyTotalData:", err);
+    logEvent({
+      level: 'error', event_type: "GET_PAYROLL_SUMMARY", user_id: req.user?.id || null, event_details: { err }, error_message: err.message
+    })
     res.status(500).json({ error: "Database query failed" });
   }
 };
-
 
 const getSalaryRange = async (req, res) => {
   try {
@@ -56,6 +55,10 @@ const getSalaryRange = async (req, res) => {
     res.json(rows.map(r => r.basic_salary));
   } catch (err) {
     console.error('Failed to fetch salaries:', err);
+    logEvent({level:'error',  event_type: "GET_SALARY_LIST",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message })
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -83,7 +86,11 @@ const compensateTrend = async (req, res) => {
     const [rows] = await pool.query(sql, [months]);
     res.json(rows);
   } catch (err) {
-    console.error("Error in compensateTrendLastMonths:", err);
+    console.error("Error in compensateTrend:", err);
+    logEvent({level:'error',  event_type: "GET_COMPENSATE_TRENDS",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message})
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -113,6 +120,12 @@ const getDeductionsByType = async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error('Error fetching deductions by type:', err);
+    logEvent({
+      level: 'error', event_type: "GET_DEDUCTION_BY_TYPE",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -143,6 +156,13 @@ const getAllowancesByType = async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error('Error fetching allowances by type:', err);
+    logEvent({
+      level: 'error', event_type: "GET_ALLOWANCE_BY_TYPE",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
+
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -180,13 +200,18 @@ const getBonusesByType = async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error('Error fetching bonuses by type:', err);
+    logEvent({
+      level: 'error', event_type: "GET_BONUS_BY_TYPE",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
     res.status(500).json({ error: 'Database query failed' });
   }
 };
 
 
-
-// Controller to get employee insights with optional department filter
+//get employee insights with optional department filter
 const getEmployeeInsights = async (req, res) => {
   try {
     const { departmentId } = req.query;
@@ -224,7 +249,6 @@ const getEmployeeInsights = async (req, res) => {
       queryParams
     );
 
-    // Send response
     res.json({
       total_employees,
       total_departments,
@@ -235,7 +259,13 @@ const getEmployeeInsights = async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching employee insights:', error);
-    res.status(500).json({ error: 'Database query failed' });
+    logEvent({
+      level: 'error', event_type: "GET_EMPLOYEE_SUMMARY",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
+    res.status(500).json({ ok: false, message: 'Database query failed' });
   }
 };
 
@@ -249,9 +279,6 @@ const getAllDepartments = async (req, res) => {
     res.status(500).json({ error: 'Database query failed' });
   }
 };
-
-
-
 
 module.exports = {
   getMonthlyTotalData, getSalaryRange, compensateTrend, getAllowancesByType, getBonusesByType, getDeductionsByType, getEmployeeInsights, getAllDepartments
