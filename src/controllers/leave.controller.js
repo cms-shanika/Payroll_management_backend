@@ -131,29 +131,128 @@ exports.statusList = async (req, res) => {
 exports.calendarFeed = async (req, res) => {
   const { from, to } = req.query;
 
-  const [rows] = await pool.query(
-    `SELECT lr.id, e.full_name, lt.name AS leave_type,
-            lr.start_date, lr.end_date, lr.status, lr.duration_hours
-     FROM leave_requests lr
-     JOIN employees e ON e.id = lr.employee_id
-     JOIN leave_types lt ON lt.id = lr.leave_type_id
-     WHERE lr.status = 'APPROVED'
-       AND lr.end_date >= ? AND lr.start_date <= ?
-     ORDER BY lr.start_date ASC`,
-    [from, to]
-  );
+  try {
+    // 🔹 1) Employee leave events
+    const [rows] = await pool.query(
+      `SELECT lr.id,
+              e.full_name,
+              e.employee_code,
+              lt.name AS leave_type,
+              lr.start_date,
+              lr.end_date,
+              lr.status,
+              lr.duration_hours
+       FROM leave_requests lr
+       JOIN employees e ON e.id = lr.employee_id
+       JOIN leave_types lt ON lt.id = lr.leave_type_id
+       WHERE lr.status = 'APPROVED'
+         AND lr.end_date >= ? AND lr.start_date <= ?
+       ORDER BY lr.start_date ASC`,
+      [from, to]
+    );
 
-  const events = rows.map(r => ({
-    id: r.id,
-    title: `${r.full_name} - ${r.leave_type}`,
-    start: r.start_date,
-    end: r.end_date,
-    status: r.status,
-    hours: r.duration_hours
-  }));
+    const events = rows.map(r => ({
+      id: r.id,
+      full_name: r.full_name,
+      employee_code: r.employee_code,
+      leave_type: r.leave_type,
+      start_date: r.start_date,
+      end_date: r.end_date,
+      status: r.status,
+      duration_hours: r.duration_hours,
 
-  res.json({ ok:true, events });
+      // backward-compatible fields if you use them elsewhere
+      title: `${r.full_name} - ${r.leave_type}`,
+      start: r.start_date,
+      end: r.end_date,
+      hours: r.duration_hours,
+    }));
+
+    // 🔹 2) Special / Restricted dates from new table
+    const [restrictionRows] = await pool.query(
+      `SELECT id, date, type, reason
+       FROM calendar_restrictions
+       WHERE date >= ? AND date <= ?
+       ORDER BY date ASC`,
+      [from, to]
+    );
+
+    res.json({
+      ok: true,
+      events,
+      restrictions: restrictionRows,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
 };
+
+// 🔹 Create / update a restriction for a date
+exports.saveRestriction = async (req, res) => {
+  try {
+    const { date, type, reason } = req.body;
+    if (!date || !type) {
+      return res.status(400).json({ ok: false, message: 'date and type are required' });
+    }
+
+    // Upsert by unique date
+    const [result] = await pool.query(
+      `INSERT INTO calendar_restrictions (date, type, reason, created_by_user_id)
+       VALUES (?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         type = VALUES(type),
+         reason = VALUES(reason),
+         updated_at = CURRENT_TIMESTAMP`,
+      [date, type, reason || null, req.user?.id || null]
+    );
+
+    // fetch the row back (so we get id)
+    const [rows] = await pool.query(
+      `SELECT id, date, type, reason
+       FROM calendar_restrictions
+       WHERE date = ?`,
+      [date]
+    );
+
+    res.json({ ok: true, data: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
+};
+
+// 🔹 Delete restriction by date or id
+exports.deleteRestriction = async (req, res) => {
+  try {
+    const { id } = req.params;    // /calendar/restrictions/:id
+    const { date } = req.query;   // OR /calendar/restrictions?date=YYYY-MM-DD
+
+    if (!id && !date) {
+      return res.status(400).json({ ok: false, message: 'id or date is required' });
+    }
+
+    let result;
+    if (id) {
+      [result] = await pool.query(
+        'DELETE FROM calendar_restrictions WHERE id = ?',
+        [id]
+      );
+    } else {
+      [result] = await pool.query(
+        'DELETE FROM calendar_restrictions WHERE date = ?',
+        [date]
+      );
+    }
+
+    res.json({ ok: true, affectedRows: result.affectedRows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
+};
+
+
 
 exports.summary = async (req, res) => {
   const year = parseInt(req.query.year || String(dayjs().year()), 10);
