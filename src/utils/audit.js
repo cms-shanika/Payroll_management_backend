@@ -26,29 +26,29 @@ async function logAudit({ level = "info", user_id, action_type, target_table, ta
         console.error('Audit logger not available:', logPayload);
     }
 
-    try {
-        const sql = `
-      INSERT INTO audit_logs
-      (user_id, action_type, target_table, target_id, before_state, after_state, ip_address, status, error_message)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+    // try {
+    //     const sql = `
+    //   INSERT INTO audit_logs
+    //   (user_id, action_type, target_table, target_id, before_state, after_state, ip_address, status, error_message)
+    //   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    // `;
 
-        const params = [
-            user_id,
-            action_type,
-            target_table,
-            target_id,
-            before_state ? JSON.stringify(before_state) : null,
-            after_state ? JSON.stringify(after_state) : null,
-            ip,
-            status,
-            error_message
-        ];
+    //     const params = [
+    //         user_id,
+    //         action_type,
+    //         target_table,
+    //         target_id,
+    //         before_state ? JSON.stringify(before_state) : null,
+    //         after_state ? JSON.stringify(after_state) : null,
+    //         ip,
+    //         status,
+    //         error_message
+    //     ];
 
-        await pool.query(sql, params);
-    } catch (err) {
-        console.error('Failed to insert audit log into DB', err);
-    }
+    //     await pool.query(sql, params);
+    // } catch (err) {
+    //     console.error('Failed to insert audit log into DB', err);
+    // }
 }
 
 module.exports = logAudit;
