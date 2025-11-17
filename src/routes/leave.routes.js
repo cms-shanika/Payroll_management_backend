@@ -21,4 +21,12 @@ router.get('/summary', ctrl.summary);
 // 🔹 Employee balances for EmployeeLeaves.jsx
 router.get('/balances', ctrl.employeeBalances);
 
+router.get('/calendar', ctrl.calendarFeed);
+
+// Special / restricted dates for leave calendar
+router.post('/calendar/restrictions', ctrl.saveRestriction);
+router.delete('/calendar/restrictions/:id', ctrl.deleteRestriction);
+
+
+
 module.exports = router;
