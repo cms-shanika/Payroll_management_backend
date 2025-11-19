@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
 
 function requireAuth(req, res, next) {
   const hdr = req.headers.authorization || '';
@@ -13,7 +13,7 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ ok: false, message: 'Missing token' });
   }
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const payload = jwt.verify(token, `super_secret_change_me`);
     req.user = payload; // { id, role, name, email }
 
     next();

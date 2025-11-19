@@ -1,6 +1,6 @@
 const { level } = require('winston');
 const pool = require('../config/db');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
 
 const getMonthlyTotalData = async (req, res) => {
   try {

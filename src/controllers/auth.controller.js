@@ -1,7 +1,7 @@
 const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
 
 exports.login = async (req, res) => {
   const { email, password } = req.body;
@@ -24,7 +24,7 @@ exports.login = async (req, res) => {
 
     const token = jwt.sign(
       { id: user.id, role: user.role, name: user.name, email: user.email },
-      process.env.JWT_SECRET ,
+      process.env.JWT_SECRET || 'super_secret_change_me',
       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
     );
 

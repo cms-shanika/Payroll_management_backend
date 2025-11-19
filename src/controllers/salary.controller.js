@@ -1,8 +1,8 @@
 // src/controllers/salary.controller.js
 const pool = require('../config/db');
 const PDFDocument = require('pdfkit');
-const logEvent = require('../utils/event');
-const logAudit = require('../utils/audit');
+const logEvent = require('../services/logEvent');
+const logAudit = require('../services/logAudit');
 
 //new compensation adjusmnt
 
