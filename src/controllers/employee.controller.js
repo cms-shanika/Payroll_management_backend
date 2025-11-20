@@ -583,3 +583,159 @@ exports.replaceEmployeeDocument = async (req, res) => {
     res.status(500).json({ ok: false, message: 'Failed to replace document' });
   }
 };
+
+
+// ================= PERFORMANCE & TRAINING =================
+
+// Latest performance review per employee (for overview page)
+exports.getPerformanceOverview = async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        e.id AS employee_id,
+        e.employee_code,
+        e.full_name,
+        e.designation,
+        d.name AS department_name,
+        pr.rating,
+        pr.review_date,
+        pr.reviewer_name,
+        pr.strengths,
+        pr.improvements
+      FROM employees e
+      LEFT JOIN departments d ON d.id = e.department_id
+      LEFT JOIN employee_performance_reviews pr
+        ON pr.id = (
+          SELECT pr2.id 
+          FROM employee_performance_reviews pr2
+          WHERE pr2.employee_id = e.id
+          ORDER BY pr2.review_date DESC, pr2.id DESC
+          LIMIT 1
+        )
+      WHERE e.status = 'Active'
+      ORDER BY e.full_name ASC
+    `);
+
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to load performance overview' });
+  }
+};
+
+// Create a new performance review
+exports.addPerformanceReview = async (req, res) => {
+  try {
+    const {
+      employee_id,
+      review_date,      // 'YYYY-MM-DD'
+      reviewer_name,
+      rating,           // 0 - 5, can have decimals
+      strengths,
+      improvements,
+    } = req.body;
+
+    const [result] = await pool.query(
+      `INSERT INTO employee_performance_reviews
+        (employee_id, review_date, reviewer_name, rating, strengths, improvements)
+       VALUES (?,?,?,?,?,?)`,
+      [
+        employee_id,
+        review_date || new Date().toISOString().slice(0, 10),
+        reviewer_name || null,
+        rating || 0,
+        strengths || null,
+        improvements || null,
+      ]
+    );
+
+    res.status(201).json({ ok: true, id: result.insertId, message: 'Performance review added' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to add performance review' });
+  }
+};
+
+// Latest/active training record per employee
+exports.getTrainingOverview = async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT
+        e.id AS employee_id,
+        e.employee_code,
+        e.full_name,
+        e.designation,
+        d.name AS department_name,
+        tr.training_course,
+        tr.status,
+        tr.start_date,
+        tr.end_date,
+        tr.score,
+        tr.certificate
+      FROM employees e
+      LEFT JOIN departments d ON d.id = e.department_id
+      LEFT JOIN employee_training_records tr
+        ON tr.id = (
+          SELECT tr2.id
+          FROM employee_training_records tr2
+          WHERE tr2.employee_id = e.id
+          ORDER BY 
+            CASE tr2.status
+              WHEN 'In Progress' THEN 1
+              WHEN 'Scheduled' THEN 2
+              WHEN 'Completed' THEN 3
+              ELSE 4
+            END,
+            tr2.start_date DESC,
+            tr2.id DESC
+          LIMIT 1
+        )
+      WHERE e.status = 'Active'
+      ORDER BY e.full_name ASC
+    `);
+
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to load training overview' });
+  }
+};
+
+// Assign / schedule training
+exports.addTrainingRecord = async (req, res) => {
+  try {
+    const {
+      employee_id,
+      training_course,
+      status,       // 'Scheduled' | 'In Progress' | 'Completed' | 'Cancelled'
+      start_date,   // 'YYYY-MM-DD'
+      end_date,     // 'YYYY-MM-DD'
+      score,        // string like '95%' or null
+      certificate,  // 'Available' | 'Not Available'
+    } = req.body;
+
+    if (!employee_id || !training_course) {
+      return res.status(400).json({ ok: false, message: 'employee_id and training_course are required' });
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO employee_training_records
+        (employee_id, training_course, status, start_date, end_date, score, certificate)
+       VALUES (?,?,?,?,?,?,?)`,
+      [
+        employee_id,
+        training_course,
+        status || 'Scheduled',
+        start_date || null,
+        end_date || null,
+        score || null,
+        certificate || 'Not Available',
+      ]
+    );
+
+    res.status(201).json({ ok: true, id: result.insertId, message: 'Training record added' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to add training record' });
+  }
+};
