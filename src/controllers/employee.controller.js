@@ -3,27 +3,52 @@ const pool = require('../config/db');
 const path = require('path');
 const fs = require('fs');
 
-
 function baseUrl(req) {
   return process.env.BACKEND_PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
 }
+
 function toUrl(req, filePath) {
   if (!filePath) return null;
-  const filename = String(filePath).split(/[/\\]/).pop();
+
+  // normalize
+  const normalized = String(filePath).replace(/\\/g, '/');
+
+  // If DB has full path like ".../uploads/12345_pic.jpg"
+  const idx = normalized.toLowerCase().lastIndexOf('/uploads/');
+  if (idx !== -1) {
+    const rel = normalized.slice(idx + 1); // "uploads/12345_pic.jpg"
+    return `${baseUrl(req)}/${rel}`;
+  }
+
+  // New style: DB has only filename "12345_pic.jpg"
+  const filename = normalized.split('/').pop();
   return `${baseUrl(req)}/uploads/${filename}`;
 }
+
 function kindFromType(t = '') {
   if (t.startsWith('image/')) return 'image';
   if (t === 'application/pdf') return 'pdf';
   return 'file';
 }
+
 function extractCategory(file_name = '') {
   // we store "Category::original.ext" for personal documents (no DB change needed)
   const m = String(file_name).match(/^([^:]+)::/);
   return m ? m[1] : null;
 }
+
 function stripCategoryPrefix(name = '') {
   return String(name).replace(/^[^:]+::/, '');
+}
+
+// map grade letter → grade_id
+function gradeToId(grade) {
+  if (!grade) return null;
+  const g = String(grade).trim().toUpperCase();
+  if (g === 'A') return 1;
+  if (g === 'B') return 2;
+  if (g === 'C') return 3;
+  return null;
 }
 
 // helper: get or create department by name
@@ -53,7 +78,10 @@ exports.createEmployee = async (req, res) => {
     kin_name, relationship, kin_nic, kin_dob,
   } = req.body;
 
-  const profilePhotoPath = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g, '/');
+  // only store file *name* in DB, not full disk path
+  const profilePhotoFile = req.files?.profilePhoto?.[0];
+  const profilePhotoPath = profilePhotoFile ? profilePhotoFile.filename : null;
+
   const generalDocs = Array.isArray(req.files?.documents) ? req.files.documents : [];
   const bankDoc = req.files?.bankDocument?.[0];
 
@@ -62,7 +90,12 @@ exports.createEmployee = async (req, res) => {
     await conn.beginTransaction();
 
     const department_id = await getOrCreateDepartmentId(conn, department);
-    const full_name = [first_name, last_name].filter(Boolean).join(' ').trim() || calling_name || email;
+    const grade_id = gradeToId(grade);
+
+    const full_name =
+      [first_name, last_name].filter(Boolean).join(' ').trim() ||
+      calling_name ||
+      email;
 
     const [empIns] = await conn.query(
       `INSERT INTO employees
@@ -72,20 +105,44 @@ exports.createEmployee = async (req, res) => {
         profile_photo_path, created_by_user_id,
         first_name, last_name, initials, calling_name,
         gender, dob, marital_status, nationality, religion, nic,
-        working_office, branch, employment_type, supervisor, grade, designated_emails, epf_no)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-               ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        working_office, branch, employment_type, supervisor, grade, designated_emails, epf_no, grade_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
-        null, full_name, email || null, personal_email || null,
-        phone || null, country_code || null,
-        department_id, designation || null, status || 'Active',
-        appointment_date || null, appointment_date || null,
-        address_permanent || null, address_permanent || null, address_temporary || null,
-        null, profilePhotoPath || null, (req.user && req.user.id) || 1,
-        first_name || null, last_name || null, initials || null, calling_name || null,
-        gender || null, dob || null, marital_status || null, nationality || null, religion || null, nic || null,
-        working_office || null, branch || null, employment_type || null, supervisor || null, grade || null,
-        designated_emails || null, epf_no || null,
+        null,                       // employee_code
+        full_name,
+        email || null,
+        personal_email || null,
+        phone || null,
+        country_code || null,
+        department_id,
+        designation || null,
+        status || 'Active',
+        appointment_date || null,   // joining_date
+        appointment_date || null,   // appointment_date
+        address_permanent || null,  // address
+        address_permanent || null,
+        address_temporary || null,
+        null,                       // emergency_contact
+        profilePhotoPath || null,
+        (req.user && req.user.id) || 1,
+        first_name || null,
+        last_name || null,
+        initials || null,
+        calling_name || null,
+        gender || null,
+        dob || null,
+        marital_status || null,
+        nationality || null,
+        religion || null,
+        nic || null,
+        working_office || null,
+        branch || null,
+        employment_type || null,
+        supervisor || null,
+        grade || null,
+        designated_emails || null,
+        epf_no || null,
+        grade_id || null,
       ]
     );
     const employeeId = empIns.insertId;
@@ -114,9 +171,15 @@ exports.createEmployee = async (req, res) => {
       );
     }
 
-    // Save documents. We keep the selected category in the file_name prefix "Category::original.ext"
-    const category = (req.body.document_type || '').trim();
-    for (const f of generalDocs) {
+    // ---- DOCUMENTS ----
+    // Frontend sends documents[] plus document_type_0, document_type_1, ... and total_documents
+    const totalDocs = Number(req.body.total_documents || generalDocs.length || 0);
+    // totalDocs is kept for future checks if needed
+
+    for (let i = 0; i < generalDocs.length; i++) {
+      const f = generalDocs[i];
+      const typeKey = `document_type_${i}`;
+      const category = (req.body[typeKey] || '').trim(); // e.g. "NIC Copy"
       const original = f.originalname;
       const storedName = category ? `${category}::${original}` : original;
       await conn.query(
@@ -124,10 +187,14 @@ exports.createEmployee = async (req, res) => {
         [employeeId, storedName, f.path.replace(/\\/g, '/'), f.mimetype]
       );
     }
+
+    // Bank document: store with category "Bank Document"
     if (bankDoc) {
+      const original = bankDoc.originalname;
+      const storedName = `Bank Document::${original}`;
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
-        [employeeId, `BANK-${bankDoc.originalname}`, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
+        [employeeId, storedName, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
       );
     }
 
@@ -181,15 +248,24 @@ exports.getEmployeeById = async (req, res) => {
 
   emp.documents = (docs || []).map(d => {
     const url = toUrl(req, d.file_path);
-    const category = extractCategory(d.file_name);
-    const cleanName = stripCategoryPrefix(d.file_name);
+    const rawName = d.file_name || '';
+    let category = extractCategory(rawName);    // from "Category::name.ext"
+    let cleanName = stripCategoryPrefix(rawName);
+
+    // Backwards compatibility: old bank docs saved as "BANK-..."
+    if (!category && /^BANK[-\s]/i.test(rawName)) {
+      category = 'Bank Document';
+      cleanName = rawName.replace(/^BANK[-\s]*/i, '');
+    }
+
     return {
       ...d,
       file_name: cleanName,
       file_path: d.file_path,
       url,
       kind: kindFromType(d.file_type),
-      doc_category: category,            // <-- used by FE
+      doc_category: category,  // canonical field
+      category,                // alias for old frontend code
     };
   });
 
@@ -202,7 +278,8 @@ exports.updateEmployee = async (req, res) => {
   const id = Number(req.params.id);
 
   const body = req.body || {};
-  const profilePhotoPath = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g, '/');
+  const profilePhotoFile = req.files?.profilePhoto?.[0];
+  const profilePhotoPath = profilePhotoFile ? profilePhotoFile.filename : undefined;
   const generalDocs = Array.isArray(req.files?.documents) ? req.files.documents : [];
   const bankDoc = req.files?.bankDocument?.[0];
 
@@ -220,6 +297,14 @@ exports.updateEmployee = async (req, res) => {
       const fn = body.first_name || '';
       const ln = body.last_name || '';
       full_name = [fn, ln].filter(Boolean).join(' ').trim() || undefined;
+    }
+
+    // derive grade_id either from explicit grade_id or from grade letter
+    let grade_id_val = undefined;
+    if (Object.prototype.hasOwnProperty.call(body, 'grade_id')) {
+      grade_id_val = body.grade_id ? Number(body.grade_id) || null : null;
+    } else if (body.grade) {
+      grade_id_val = gradeToId(body.grade);
     }
 
     const fields = {
@@ -255,6 +340,7 @@ exports.updateEmployee = async (req, res) => {
       employment_type: body.employment_type,
       supervisor: body.supervisor,
       grade: body.grade,
+      grade_id: grade_id_val,
       designated_emails: body.designated_emails,
       epf_no: body.epf_no,
 
@@ -285,20 +371,29 @@ exports.updateEmployee = async (req, res) => {
       await conn.query('INSERT INTO salaries (employee_id, basic_salary) VALUES (?, ?)', [id, Number(body.basic_salary)]);
     }
 
-    // docs
-    const category = (body.document_type || '').trim();
-    for (const f of generalDocs) {
+    // ---- DOCUMENTS ----
+    const totalDocs = Number(req.body.total_documents || generalDocs.length || 0);
+    // totalDocs is kept for future checks if needed
+
+    for (let i = 0; i < generalDocs.length; i++) {
+      const f = generalDocs[i];
+      const typeKey = `document_type_${i}`;
+      const category = (req.body[typeKey] || '').trim();
       const original = f.originalname;
       const storedName = category ? `${category}::${original}` : original;
+
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
         [id, storedName, f.path.replace(/\\/g, '/'), f.mimetype]
       );
     }
+
     if (bankDoc) {
+      const original = bankDoc.originalname;
+      const storedName = `Bank Document::${original}`;
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
-        [id, `BANK-${bankDoc.originalname}`, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
+        [id, storedName, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
       );
     }
 
