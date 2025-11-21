@@ -36,6 +36,12 @@ const uploadFields = upload.fields([
 
 router.post('/', uploadFields, addValidations, validate, ctrl.createEmployee);
 router.get('/', ctrl.getEmployees);
+
+router.get('/performance-overview', ctrl.getPerformanceOverview);
+router.post('/performance-reviews', ctrl.addPerformanceReview);
+router.get('/training-overview', ctrl.getTrainingOverview);
+router.post('/training-records', ctrl.addTrainingRecord);
+
 router.get('/:id', ctrl.getEmployeeById);
 router.put('/:id', uploadFields, updateValidations, validate, ctrl.updateEmployee);
 router.delete('/:id', ctrl.deleteEmployee);
@@ -43,5 +49,13 @@ router.delete('/:id', ctrl.deleteEmployee);
 // document mgmt (NOTE: base path is /api/employees)
 router.delete('/:id/documents/:docId', ctrl.deleteEmployeeDocument);
 router.put('/:id/documents/:docId', upload.single('file'), ctrl.replaceEmployeeDocument);
+
+// PERFORMANCE & TRAINING OVERVIEW
+router.get('/performance-overview', ctrl.getPerformanceOverview);
+router.post('/performance-reviews', ctrl.addPerformanceReview);
+
+router.get('/training-overview', ctrl.getTrainingOverview);
+router.post('/training-records', ctrl.addTrainingRecord);
+
 
 module.exports = router;

@@ -1,3 +1,4 @@
+// src/controllers/leave.controller.js
 const pool = require('../config/db');
 const dayjs = require('dayjs');
 
@@ -108,7 +109,7 @@ exports.decideRequest = async (req, res) => {
     [newStatus, req.user.id, note || null, id]
   );
 
-  // Optional: update leave_balances on approve
+  // Update leave_balances on approve
   if (action === 'APPROVE') {
     const year = dayjs(lr.start_date).year();
     await pool.query(
@@ -123,46 +124,138 @@ exports.decideRequest = async (req, res) => {
 };
 
 exports.statusList = async (req, res) => {
-  // Same list as Request, but return extra counters for the top widgets
-  const { from, to } = req.query;
-
-  // list
-  await exports.listRequests(req, res);  // re-use the above handler by calling it
-  
+  // Re-use listRequests for now
+  await exports.listRequests(req, res);
 };
 
 exports.calendarFeed = async (req, res) => {
   const { from, to } = req.query;
 
-  const [rows] = await pool.query(
-    `SELECT lr.id, e.full_name, lt.name AS leave_type,
-            lr.start_date, lr.end_date, lr.status, lr.duration_hours
-     FROM leave_requests lr
-     JOIN employees e ON e.id = lr.employee_id
-     JOIN leave_types lt ON lt.id = lr.leave_type_id
-     WHERE lr.status = 'APPROVED'
-       AND lr.end_date >= ? AND lr.start_date <= ?
-     ORDER BY lr.start_date ASC`,
-    [from, to]
-  );
+  try {
+    const [rows] = await pool.query(
+      `SELECT
+         lr.id,
+         lr.employee_id,
+         e.employee_code,
+         e.full_name,
+         lt.name AS leave_type,
+         lr.start_date,
+         lr.end_date,
+         lr.status,
+         lr.duration_hours
+       FROM leave_requests lr
+       JOIN employees e ON e.id = lr.employee_id
+       JOIN leave_types lt ON lt.id = lr.leave_type_id
+       WHERE lr.status = 'APPROVED'
+         AND lr.end_date >= ? AND lr.start_date <= ?
+       ORDER BY lr.start_date ASC`,
+      [from, to]
+    );
 
-  // Simple calendar event format
-  const events = rows.map(r => ({
-    id: r.id,
-    title: `${r.full_name} - ${r.leave_type}`,
-    start: r.start_date,
-    end: r.end_date,
-    status: r.status,
-    hours: r.duration_hours
-  }));
+    const events = rows.map(r => ({
+      id: r.id,
+      employee_id: r.employee_id,
+      employee_code: r.employee_code,
+      full_name: r.full_name,
+      leave_type: r.leave_type,
+      start_date: r.start_date,
+      end_date: r.end_date,
+      status: r.status,
+      duration_hours: r.duration_hours,
 
-  res.json({ ok:true, events });
+      // backward-compatible fields
+      title: `${r.full_name} - ${r.leave_type}`,
+      start: r.start_date,
+      end: r.end_date,
+      hours: r.duration_hours,
+    }));
+
+    // also return restrictions from calendar_restrictions if you added that:
+    const [restrictionRows] = await pool.query(
+      `SELECT id, date, type, reason
+       FROM calendar_restrictions
+       WHERE date >= ? AND date <= ?
+       ORDER BY date ASC`,
+      [from, to]
+    );
+
+    res.json({ ok: true, events, restrictions: restrictionRows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
 };
+
+
+// 🔹 Create / update a restriction for a date
+exports.saveRestriction = async (req, res) => {
+  try {
+    const { date, type, reason } = req.body;
+    if (!date || !type) {
+      return res.status(400).json({ ok: false, message: 'date and type are required' });
+    }
+
+    // Upsert by unique date
+    const [result] = await pool.query(
+      `INSERT INTO calendar_restrictions (date, type, reason, created_by_user_id)
+       VALUES (?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         type = VALUES(type),
+         reason = VALUES(reason),
+         updated_at = CURRENT_TIMESTAMP`,
+      [date, type, reason || null, req.user?.id || null]
+    );
+
+    // fetch the row back (so we get id)
+    const [rows] = await pool.query(
+      `SELECT id, date, type, reason
+       FROM calendar_restrictions
+       WHERE date = ?`,
+      [date]
+    );
+
+    res.json({ ok: true, data: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
+};
+
+// 🔹 Delete restriction by date or id
+exports.deleteRestriction = async (req, res) => {
+  try {
+    const { id } = req.params;    // /calendar/restrictions/:id
+    const { date } = req.query;   // OR /calendar/restrictions?date=YYYY-MM-DD
+
+    if (!id && !date) {
+      return res.status(400).json({ ok: false, message: 'id or date is required' });
+    }
+
+    let result;
+    if (id) {
+      [result] = await pool.query(
+        'DELETE FROM calendar_restrictions WHERE id = ?',
+        [id]
+      );
+    } else {
+      [result] = await pool.query(
+        'DELETE FROM calendar_restrictions WHERE date = ?',
+        [date]
+      );
+    }
+
+    res.json({ ok: true, affectedRows: result.affectedRows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
+};
+
+
 
 exports.summary = async (req, res) => {
   const year = parseInt(req.query.year || String(dayjs().year()), 10);
 
-  // usage by type
   const [byType] = await pool.query(
     `SELECT lt.name AS leave_type, SUM(lr.duration_hours) AS hours
      FROM leave_requests lr
@@ -173,7 +266,6 @@ exports.summary = async (req, res) => {
     [year]
   );
 
-  // employees currently on leave today
   const today = dayjs().format('YYYY-MM-DD');
   const [[{ onLeaveToday }]] = await pool.query(
     `SELECT COUNT(*) AS onLeaveToday
@@ -189,3 +281,123 @@ exports.summary = async (req, res) => {
     byType
   });
 };
+
+// 🔹 NEW: Employee leave balances for EmployeeLeaves.jsx
+// 🔹 Employee leave balances for EmployeeLeaves.jsx
+exports.employeeBalances = async (req, res) => {
+  try {
+    const year = parseInt(req.query.year || String(dayjs().year()), 10);
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '50', 10)));
+    const offset = (page - 1) * pageSize;
+
+    const { department_id, search } = req.query;
+
+    const filters = [];
+    const params = [];
+
+    if (department_id) {
+      filters.push('e.department_id = ?');
+      params.push(Number(department_id));
+    }
+    if (search) {
+      filters.push('(e.full_name LIKE ? OR e.employee_code LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`);
+    }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+
+    // 👉 Aggregate USED days from leave_requests (APPROVED, given year)
+    //    Aggregate ENTITLED days from leave_balances (if you have them)
+    const [rows] = await pool.query(
+      `SELECT
+          e.id AS employee_id,
+          e.employee_code,
+          e.full_name,
+          COALESCE(d.name, e.department_name) AS department_name,
+
+          -- used days, based on APPROVED requests in the selected year
+          SUM(
+            CASE
+              WHEN lr.status = 'APPROVED'
+                   AND YEAR(lr.start_date) = ?
+                   AND lt_req.name = 'Personal'
+              THEN lr.duration_hours
+              ELSE 0
+            END
+          ) / 8 AS annualUsed,
+
+          SUM(
+            CASE
+              WHEN lr.status = 'APPROVED'
+                   AND YEAR(lr.start_date) = ?
+                   AND lt_req.name = 'Sick'
+              THEN lr.duration_hours
+              ELSE 0
+            END
+          ) / 8 AS casualUsed,
+
+          -- entitled days (totals) from leave_balances if present
+          SUM(
+            CASE
+              WHEN lt_bal.name = 'Personal' THEN lb.entitled_days
+              ELSE 0
+            END
+          ) AS annualTotal,
+
+          SUM(
+            CASE
+              WHEN lt_bal.name = 'Sick' THEN lb.entitled_days
+              ELSE 0
+            END
+          ) AS casualTotal
+
+       FROM employees e
+       LEFT JOIN departments d ON d.id = e.department_id
+
+       -- approved leave requests
+       LEFT JOIN leave_requests lr
+         ON lr.employee_id = e.id
+       LEFT JOIN leave_types lt_req
+         ON lt_req.id = lr.leave_type_id
+
+       -- leave entitlements (optional)
+       LEFT JOIN leave_balances lb
+         ON lb.employee_id = e.id AND lb.year = ?
+       LEFT JOIN leave_types lt_bal
+         ON lt_bal.id = lb.leave_type_id
+
+       ${where}
+       GROUP BY e.id, e.employee_code, e.full_name, d.name, e.department_name
+       ORDER BY e.full_name ASC
+       LIMIT ? OFFSET ?`,
+      [year, year, year, ...params, pageSize, offset]
+    );
+
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS count
+       FROM employees e
+       ${where}`,
+      params
+    );
+    const total = countRows[0]?.count || 0;
+
+    const data = rows.map((r) => ({
+      employee_id: r.employee_id,
+      employee_code: r.employee_code,
+      name: r.full_name,
+      department: r.department_name || "N/A",
+      annualUsed: Number(r.annualUsed || 0),
+      annualTotal: Number(r.annualTotal || 0),
+      casualUsed: Number(r.casualUsed || 0),
+      casualTotal: Number(r.casualTotal || 0),
+      halfDay1: "0 / 0",
+      halfDay2: "0 / 0",
+    }));
+
+    res.json({ ok: true, page, pageSize, total, data, year });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
+};
+
