@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
 
 function requireAuth(req, res, next) {
   const hdr = req.headers.authorization || '';

@@ -1,4 +1,4 @@
- function getDifferences(before, after) {
+ function getDifference(before, after) {
   const diff = {};
   for (const key in after) {
     if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) {
@@ -8,4 +8,4 @@
   return diff;
 }
 
-module.exports = { getDifferences };
+module.exports = { getDifference };

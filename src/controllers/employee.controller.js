@@ -2,8 +2,8 @@
 const pool = require('../config/db');
 const path = require('path');
 const fs = require('fs');
-const logAudit = require('../utils/audit');
-const logEvent = require('../utils/event');
+const logAudit = require('../services/logAudit');
+const logEvent = require('../services/logEvent');
 
 
 function baseUrl(req) {

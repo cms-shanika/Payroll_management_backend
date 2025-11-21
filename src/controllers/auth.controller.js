@@ -1,7 +1,7 @@
 const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
 
 exports.login = async (req, res) => {
   const { email, password } = req.body;
