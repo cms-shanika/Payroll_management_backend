@@ -1,6 +1,8 @@
 // src/controllers/salary.controller.js
 const pool = require('../config/db');
 const PDFDocument = require('pdfkit');
+const logEvent = require('../utils/event');
+const logAudit = require('../utils/audit');
 
 //new compensation adjusmnt
 
@@ -40,19 +42,28 @@ const getGrades = async (_req, res) => {
     if (!rows || !rows.length) return res.json(GRADES_FALLBACK);
     return res.json(rows);
   } catch (err) {
+    console.error(err);
+    logEvent({
+      level: 'error', event_type: "GET_GRADES",
+      user_id: req.user?.id || null,
+      event_details: {},
+      status: "FAILURE",
+      error_message: err.message,
+      req
+    })
     return res.json(GRADES_FALLBACK);
   }
 }
 
 const gradeNameOf = async (gradeId) => {
-  try{
+  try {
     const [[row]] = await pool.query(
       'SELECT grade_name FROM grades WHERE grade_id = ? LIMIT 1',
       [gradeId]
     );
-    return row?.grade_name || (GRADES_FALLBACK,find(g => g.gradeId == gradeId)?.grade_name ?? null);
+    return row?.grade_name || (GRADES_FALLBACK, find(g => g.gradeId == gradeId)?.grade_name ?? null);
   } catch {
-    return GRADES_FALLBACK,find(g => g.grade_id == gradeId)?.grade_name ?? null;
+    return GRADES_FALLBACK, find(g => g.grade_id == gradeId)?.grade_name ?? null;
   }
 };
 
@@ -83,6 +94,16 @@ const getOvertimeRulesByGrade = async (req, res) => {
     res.json(rows[0] || null);
   } catch (err) {
     console.error('getOvertimeRulesByGrade error:', err);
+    logEvent({
+      level: 'error', event_type: "GET_OVER_TIME_RULES_BY_GRADE_ERROR",
+      user_id: user?.id || null,
+      event_details: {
+        email,
+        ip: ip_address,
+        error: err
+      },
+      error_message: err.message
+    })
     res.status(500).json({ message: 'Failed to fetch overtime rules' });
   }
 };
@@ -105,13 +126,37 @@ const upsertOvertimeRule = async (req, res) => {
          created_at = NOW()`
       , [grade_id, ot_rate, max_ot_hours]
     );
+    logAudit({
+      user_id: req.user.id,
+      action_type: "UPSERT_OVERTIME_RULE",
+      target_table: "overtime_rule",
+      target_id: grade_id,
+      before_state: null,   // we skip state diff here
+      after_state: { grade_id, ot_rate, max_ot_hours },
+      req,
+      status: "SUCCESS"
+    });
 
     res.json({ message: 'Overtime rule saved' });
   } catch (err) {
     console.error('upsertOvertimeRules error:', err);
+
+    logAudit({
+      user_id: req.user.id,
+      action_type: "UPSERT_OVERTIME_RULE",
+      target_table: "overtime_rule",
+      target_id: req.body.grade_id ?? null,
+      before_state: null,
+      after_state: null,
+      req,
+      status: "FAILURE",
+      error_message: err.message
+    }).catch(() => { });
+
     res.status(500).json({ message: 'Failed to save overtime rule' });
   }
 };
+
 
 // === Employee quick search (by name or id)
 const searchEmployees = async (req, res) => {
@@ -167,19 +212,36 @@ const createOvertimeAdjustment = async (req, res) => {
         return res.status(400).json({ ok: false, message: 'No overtime rule found for this grade. Set a rule first.' });
       }
       ot_rate = rule.ot_rate;
-      // NOTE: If you need to enforce a *monthly* OT cap, you’d check accumulated hours here.
+
       if (rule.max_ot_hours != null && Number(ot_hours) > Number(rule.max_ot_hours)) {
         return res.status(400).json({ ok: false, message: `OT hours exceed monthly cap (${rule.max_ot_hours})` });
       }
     }
 
-    await pool.query(
+    const [result] = await pool.query(
       `INSERT INTO overtime_adjustments (employee_id, grade_id, ot_hours, ot_rate, adjustment_reason)
        VALUES (?, ?, ?, ?, ?)`,
       [employee_id, grade_id || null, Number(ot_hours), Number(ot_rate), adjustment_reason || null]
     );
 
+    // AUDIT LOG (important)
+    logAudit({
+      action: "ADD_OVERTIME_ADJUSTMENT",
+      target_table: "overtime_adjustments",
+      target_id: result.insertId,
+      user_id: req.user?.id || null,
+      record_id: employee_id,
+      change_details: {
+        employee_id,
+        grade_id,
+        ot_hours,
+        ot_rate,
+        adjustment_reason
+      }
+    });
+
     return res.json({ ok: true, message: 'Overtime adjustment saved' });
+
   } catch (err) {
     console.error('createOvertimeAdjustment error:', err);
     res.status(500).json({ ok: false, message: 'Failed to save overtime adjustment' });
@@ -197,7 +259,7 @@ const listOvertimeAdjustmentsByGrade = async (req, res) => {
     const params = [gradeId];
 
     if (from) { where.push('DATE(oa.created_at) >= ?'); params.push(from); }
-    if (to)   { where.push('DATE(oa.created_at) <= ?'); params.push(to); }
+    if (to) { where.push('DATE(oa.created_at) <= ?'); params.push(to); }
 
     const [rows] = await pool.query(
       `SELECT
@@ -223,6 +285,12 @@ const listOvertimeAdjustmentsByGrade = async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('listOvertimeAdjustmentsByGrade error:', err);
+    logEvent({
+      level: 'error', event_type: "GET_OVER_TIME_ADJUSTMENT_BY_GRADE",
+      user_id: req.user.id,
+      error_message: err.message,
+      event_details: { err }
+    })
     res.status(500).json({ ok: false, message: 'Failed to load overtime entries' });
   }
 };
@@ -237,7 +305,7 @@ const listOvertimeAdjustmentsByEmployee = async (req, res) => {
     const params = [employeeId];
 
     if (from) { where.push('DATE(oa.created_at) >= ?'); params.push(from); }
-    if (to)   { where.push('DATE(oa.created_at) <= ?'); params.push(to); }
+    if (to) { where.push('DATE(oa.created_at) <= ?'); params.push(to); }
 
     const [rows] = await pool.query(
       `SELECT
@@ -263,6 +331,12 @@ const listOvertimeAdjustmentsByEmployee = async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('listOvertimeAdjustmentsByEmployee error:', err);
+    logEvent({
+      level: 'error', event_type: "GET_OVER_TIME_ADJUSTMENT_BY_EMPLOYEE",
+      user_id: req.user.id,
+      error_message: err.message,
+      event_details: { err }
+    })
     res.status(500).json({ ok: false, message: 'Failed to fetch employee OT adjustments' });
   }
 };
@@ -320,6 +394,12 @@ const searchEmployeesAdvanced = async (req, res) => {
     res.json({ ok:true, data: rows });
   } catch (err) {
     console.error('searchEmployeesAdvanced error:', err);
+    logEvent({
+      level: 'error', event_type: "SEARCH_EMPLOYEE_ADVANCES",
+      user_id: req.user.id,
+      error_message: err.message,
+      event_details: { err }
+    })
     res.status(500).json({ ok:false, message:'Failed to search employees' });
   }
 };
@@ -334,6 +414,12 @@ const listDepartments = async (_req, res) => {
     res.json({ ok:true, data: rows });
   } catch (err) {
     console.error('listDepartments error:', err);
+    logEvent({
+      level: 'info', event_type: "LIST_DEPARTMENTS",
+      user_id: _req.user.id,
+      error_message: err.message,
+      event_details: { err }
+    })
     res.status(500).json({ ok:false, message:'Failed to fetch departments' });
   }
 };
@@ -389,6 +475,12 @@ const previewCompensation = async (req, res) => {
     });
   } catch (err) {
     console.error('previewCompensation error:', err);
+    logEvent({
+      level: 'error', event_type: "PREVIEW_COMPENSATION",
+      user_id: req.user.id,
+      error_message: err.message,
+      event_details: { err }
+    })
     res.status(500).json({ ok:false, message:'Failed to preview compensation' });
   }
 };
@@ -414,117 +506,145 @@ const applyCompensation = async (req, res) => {
     const effFrom = startOfMonth(month);         // for allowance window
     const effTo   = endOfMonth(month);
 
+    // Fetch employees and salaries
     const [rows] = await conn.query(
-      `
-      SELECT e.id AS employee_id, e.full_name, s.basic_salary
-      FROM employees e
-      LEFT JOIN salaries s ON s.employee_id = e.id
-      WHERE e.id IN (${employee_ids.map(()=>'?').join(',')})
-      `,
+      `SELECT e.id AS employee_id, e.full_name, s.basic_salary
+       FROM employees e
+       LEFT JOIN salaries s ON s.employee_id = e.id
+       WHERE e.id IN (${employee_ids.map(() => '?').join(',')})`,
       employee_ids
     );
 
     const calc = (basic) => mode === 'fixed'
       ? Number(amount)
-      : (Number(percent)/100) * Number(basic || 0);
+      : (Number(percent) / 100) * Number(basic || 0);
 
     await conn.beginTransaction();
 
+    let insertSql = '', insertValues = [], auditLogs = [];
+
     if (type === 'Bonus' || type === 'Arrears' || type === 'Correction') {
-      for (const r of rows) {
+      insertSql = `INSERT INTO bonuses (employee_id, amount, reason, effective_date, created_by) VALUES `;
+      rows.forEach((r, i) => {
         const val = Number(calc(r.basic_salary).toFixed(2));
-        await conn.query(
-          `INSERT INTO bonuses (employee_id, amount, reason, effective_date, created_by)
-           VALUES (?,?,?,?,?)`,
-          [r.employee_id, val, note || type, effectiveDate, req.user?.id || null]
-        );
-      }
+        insertSql += `(?,?,?,?,?)${i < rows.length - 1 ? ',' : ''}`;
+        insertValues.push(r.employee_id, val, note || type, effectiveDate, req.user?.id || null);
+        auditLogs.push({
+          user_id: req.user?.id || null,
+          action_type: 'INSERT',
+          target_table: 'bonuses',
+          after_state: { employee_id: r.employee_id, amount: val, reason: note || type, effective_date: effectiveDate }
+        });
+      });
     } else if (type === 'Allowance') {
-      for (const r of rows) {
+      insertSql = `INSERT INTO allowances (employee_id, name, category, amount, taxable, frequency, effective_from, effective_to, status, created_at) VALUES `;
+      rows.forEach((r, i) => {
         const val = Number(calc(r.basic_salary).toFixed(2));
-        await conn.query(
-          `INSERT INTO allowances
-           (employee_id, name, category, amount, taxable, frequency, effective_from, effective_to, status, created_at)
-           VALUES (?,?,?,?,?,?,?,?, 'Active', NOW())`,
-          [r.employee_id, note || 'One-time allowance', category || null, val, 0, 'Monthly', effFrom, effTo]
-        );
-      }
+        insertSql += `(?,?,?,?,?,?,?,?, 'Active', NOW())${i < rows.length - 1 ? ',' : ''}`;
+        insertValues.push(r.employee_id, note || 'One-time allowance', category || null, val, 0, 'Monthly', effFrom, effTo);
+        auditLogs.push({
+          user_id: req.user?.id || null,
+          action_type: 'INSERT',
+          target_table: 'allowances',
+          after_state: { employee_id: r.employee_id, name: note || 'One-time allowance', category, amount: val, effective_from: effFrom, effective_to: effTo }
+        });
+      });
     } else if (type === 'Reimbursement') {
+      insertSql = `INSERT INTO reimbursements (employee_id, category, amount, month, year, approved_by, created_at) VALUES `;
       const [Y, M] = month.split('-').map(Number);
-      for (const r of rows) {
+      rows.forEach((r, i) => {
         const val = Number(calc(r.basic_salary).toFixed(2));
-        await conn.query(
-          `INSERT INTO reimbursements (employee_id, category, amount, month, year, approved_by, created_at)
-           VALUES (?,?,?,?,?,?, NOW())`,
-          [r.employee_id, category || 'Other', val, M, Y, req.user?.id || null]
-        );
-      }
+        insertSql += `(?,?,?,?,?,?, NOW())${i < rows.length - 1 ? ',' : ''}`;
+        insertValues.push(r.employee_id, category || 'Other', val, M, Y, req.user?.id || null);
+        auditLogs.push({
+          user_id: req.user?.id || null,
+          action_type: 'INSERT',
+          target_table: 'reimbursements',
+          after_state: { employee_id: r.employee_id, category, amount: val, month: M, year: Y }
+        });
+      });
     } else {
       throw new Error('Unsupported type');
     }
 
-    // Single audit row for the batch
-    await conn.query(
-      `INSERT INTO audit_log (actor_user_id, action, entity, payload, created_at)
-       VALUES (?,?,?,?, NOW())`,
-      [
-        req.user?.id || null,
-        'COMPENSATION_APPLY',
-        'compensation_batch',
-        JSON.stringify({
-          type, mode, amount, percent, month, note,
-          employee_ids, at: new Date().toISOString()
-        })
-      ]
-    );
+    // Bulk insert
+    if (insertSql) await conn.query(insertSql, insertValues);
+
+    // Bulk audit logs
+    if (auditLogs.length) {
+      const auditSql = `INSERT INTO audit_logs (user_id, action_type, target_table, after_state, status, created_at) VALUES ` +
+        auditLogs.map(() => `(?,?,?,?, 'SUCCESS', NOW())`).join(',');
+      const auditParams = [];
+      auditLogs.forEach(l => {
+        auditParams.push(l.user_id, l.action_type, l.target_table, JSON.stringify(l.after_state));
+      });
+      await conn.query(auditSql, auditParams);
+    }
 
     await conn.commit();
     res.json({ ok:true, message:`Applied ${type} to ${employee_ids.length} employee(s)` });
+
   } catch (err) {
     await (conn?.rollback?.());
     console.error('applyCompensation error:', err);
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: 'COMPENSATION_APPLY',
+      target_table: 'compensation_batch',
+      target_id: null,
+      status: 'FAILED',
+      error_message: err.message,
+      after_state: { ...req.body }
+    });
     res.status(500).json({ ok:false, message:'Failed to apply compensation' });
   } finally {
     conn?.release?.();
   }
 };
 
-
 /* ===================== LISTS (for grids) ===================== */
 
 const listAllowances = async (req, res) => {
   try {
     const { employee_id } = req.query; // optional
-    const [rows] = employee_id
-      ? await pool.query(
-          `
-          SELECT 
-            id, employee_id, 
-            name AS description,
-            category, amount, taxable, frequency,
-            effective_from, effective_to,
-            status, created_at, updated_at
-          FROM allowances
-          WHERE employee_id=?
-          ORDER BY created_at DESC
-          `,
-          [employee_id]
-        )
-      : await pool.query(`
-          SELECT 
-            a.id, a.employee_id, 
-            a.name AS description,
-            a.category, a.amount, a.taxable, a.frequency,
-            a.effective_from, a.effective_to,
-            a.status, a.created_at, a.updated_at,
-            e.full_name
-          FROM allowances a
-          JOIN employees e ON e.id = a.employee_id
-          ORDER BY a.created_at DESC
-        `);
+
+    const query = employee_id
+      ? `
+        SELECT 
+          id, employee_id, 
+          name AS description,
+          category, amount, taxable, frequency,
+          effective_from, effective_to,
+          status, created_at, updated_at
+        FROM allowances
+        WHERE employee_id=?
+        ORDER BY created_at DESC
+      `
+      : `
+        SELECT 
+          a.id, a.employee_id, 
+          a.name AS description,
+          a.category, a.amount, a.taxable, a.frequency,
+          a.effective_from, a.effective_to,
+          a.status, a.created_at, a.updated_at,
+          e.full_name
+        FROM allowances a
+        JOIN employees e ON e.id = a.employee_id
+        ORDER BY a.created_at DESC
+      `;
+
+    const params = employee_id ? [employee_id] : [];
+    const [rows] = await pool.query(query, params);
     res.json({ ok: true, data: rows });
+
   } catch (err) {
     console.error(err);
+    logEvent({
+      level: 'error', event_type: "GET_ALLOWANCE_LIST_FAILED",
+      user_id: req.user?.id,
+      severity: "ERROR",
+      event_details: { error: err.message }
+    })
     res.status(500).json({ ok: false, message: 'Failed to load allowances' });
   }
 };
@@ -543,6 +663,12 @@ const listOvertime = async (req, res) => {
     res.json({ ok: true, data: rows });
   } catch (err) {
     console.error(err);
+    logEvent({
+      level: 'error', event_type: "GET_OVERTIME_LIST_FAILED",
+      user_id: req.user?.id,
+      severity: "ERROR",
+      event_details: { error: err.message }
+    })
     res.status(500).json({ ok: false, message: 'Failed to load overtime/adjustments' });
   }
 };
@@ -574,6 +700,12 @@ const listDeductions = async (req, res) => {
     res.json({ ok: true, data: rows });
   } catch (err) {
     console.error(err);
+    logEvent({
+      level: 'error', event_type: "GET_DEDUCTIONS_LIST_FAILED",
+      user_id: req.user?.id,
+      severity: "ERROR",
+      event_details: { error: err.message }
+    })
     res.status(500).json({ ok: false, message: 'Failed to load deductions' });
   }
 };
@@ -607,10 +739,40 @@ const createDeduction = async (req, res) => {
        VALUES (?,?,?,?,?,?,?,?,NOW(),NOW())`,
       [employee_id, name, type, basis, percent ?? null, amount ?? null, effective_date, status]
     );
+    logAudit({
+      user_id: req.user.id,
+      action_type: "CREATE_DEDUCTION",
+      target_table: "deductions",
+      target_id: result.insertId,
+      before_state: null,
+      after_state: {
+        employee_id,
+        name,
+        type,
+        basis,
+        percent: percent ?? null,
+        amount: amount ?? null,
+        effective_date,
+        status
+      },
+      req,
+      status: "SUCCESS"
+    });
 
     res.json({ ok: true, id: result.insertId, message: 'Deduction saved' });
   } catch (err) {
     console.error(err);
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: "CREATE_DEDUCTION",
+      target_table: "deductions",
+      target_id: null,
+      before_state: null,
+      after_state: req.body,
+      req,
+      status: "FAILURE"
+    })
+
     res.status(500).json({ ok: false, message: 'Failed to save deduction' });
   }
 };
@@ -628,6 +790,12 @@ const getDeductionById = async (req, res) => {
     res.json({ ok: true, data: row });
   } catch (err) {
     console.error(err);
+    logEvent({
+      level: 'error', event_type: "GET_DEDUCTION_BYID",
+      user_id: req.user.id,
+      error_message: err.message,
+      event_details: { err }
+    })
     res.status(500).json({ ok: false, message: 'Failed to load deduction' });
   }
 };
@@ -651,6 +819,11 @@ const updateDeduction = async (req, res) => {
       return res.status(400).json({ ok: false, message: 'Missing required fields' });
     }
 
+    const [[before]] = await pool.query(`SELECT * FROM deductions WHERE id = ?`, [id]);
+    if (!before) {
+      return res.status(404).json({ ok: false, message: 'Deduction not found' });
+    }
+
     await pool.query(
       `UPDATE deductions
           SET employee_id=?, name=?, type=?, basis=?, percent=?, amount=?, effective_date=?, status=?, updated_at=NOW()
@@ -668,9 +841,36 @@ const updateDeduction = async (req, res) => {
       ]
     );
 
+    const [[after]] = await pool.query(`SELECT * FROM deductions WHERE id = ?`, [id]);
+
+    logAudit({
+      user_id: req.user.id,
+      action_type: "UPDATE_DEDUCTION",
+      target_table: "deductions",
+      target_id: id,
+      before_state: before,
+      after_state: after,
+      req,
+      status: "SUCCESS"
+    });
+
     res.json({ ok: true, message: 'Deduction Updated' });
   } catch (err) {
     console.error(err);
+
+    try {
+      logAudit({
+        user_id: req.user?.id || null,
+        action_type: "UPDATE_DEDUCTION",
+        target_table: "deductions",
+        target_id: req.params.id,
+        before_state: null,
+        after_state: req.body,
+        req,
+        status: "FAILURE"
+      });
+    } catch (e) { }
+
     res.status(500).json({ ok: false, message: 'Failed to Update deduction' });
   }
 };
@@ -679,10 +879,38 @@ const updateDeduction = async (req, res) => {
 const deleteDeduction = async (req, res) => {
   try {
     const { id } = req.params;
+    const [[before]] = await pool.query(`SELECT * FROM deductions WHERE id = ?`, [id]);
+    if (!before) {
+      return res.status(404).json({ ok: false, message: 'Deduction not found' });
+    }
+
     await pool.query('DELETE FROM deductions WHERE id=?', [id]);
+
+    logAudit({
+      user_id: req.user.id,
+      action_type: "DELETE_DEDUCTION",
+      target_table: "deductions",
+      target_id: id,
+      before_state: before,
+      after_state: null,
+      req,
+      status: "SUCCESS"
+    });
+
     res.json({ ok: true, message: 'Deduction deleted' });
   } catch (err) {
     console.error(err);
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: "DELETE_DEDUCTION",
+      target_table: "deductions",
+      target_id: req.params.id,
+      before_state: null,
+      after_state: null,
+      req,
+      status: "FAILURE"
+    });
+
     res.status(500).json({ ok: false, message: 'Failed to delete deduction' });
   }
 };
@@ -696,10 +924,27 @@ const deleteDeduction = async (req, res) => {
 /* ========== BASIC SALARY (also used by percent preview) ========== */
 
 const getBasicSalary = async (req, res) => {
-  const { employee_id } = req.query;
-  if (!employee_id) return res.status(400).json({ ok: false, message: 'employee_id required' });
-  const [[row]] = await pool.query('SELECT basic_salary FROM salaries WHERE employee_id=?', [employee_id]);
-  res.json({ basic_salary: row?.basic_salary || 0 });
+  try {
+    const { employee_id } = req.query;
+
+    if (!employee_id) return res.status(400).json({ ok: false, message: 'employee_id required' });
+    const [[row]] = await pool.query('SELECT basic_salary FROM salaries WHERE employee_id=?', [employee_id]);
+
+    if (!row) {
+      return res.status(404).json({ ok: false, message: 'Employee salary not found' });
+    }
+
+    res.json({ basic_salary: row?.basic_salary || 0 });
+  } catch (err) {
+    console.error('getBasicSalary error:', err);
+    logEvent({
+      level: 'error', event_type: "GET_OVERTIME_LIST_FAILED",
+      user_id: req.user?.id || null,
+      severity: "ERROR",
+      event_details: { error: err.message }
+    })
+    res.status(500).json({ ok: false, message: 'Failed to fetch basic salary' });
+  }
 };
 
 const setBasicSalary = async (req, res) => {
@@ -737,16 +982,52 @@ const addAllowance = async (req, res) => {
       return res.status(400).json({ ok: false, message: 'employee_id, description, amount are required' });
     }
 
-    await pool.query(
+    const [result] = await pool.query(
       `INSERT INTO allowances
         (employee_id, name, category, amount, taxable, frequency, effective_from, effective_to, status, created_at)
        VALUES (?,?,?,?,?,?,?,?,?, NOW())`,
       [employee_id, description, category, amount, Number(taxable) ? 1 : 0, frequency, effective_from, effective_to, status]
     );
 
+    const allowanceId = result.insertId;
+
+    logAudit({
+      user_id: req.user.id,
+      action_type: "CREATE",
+      target_table: "allowances",
+      target_id: allowanceId,
+      before_state: null,
+      after_state: {
+        employee_id,
+        description,
+        category,
+        amount,
+        taxable: Number(taxable) ? 1 : 0,
+        frequency,
+        effective_from,
+        effective_to,
+        status
+      },
+      req,
+      status: "SUCCESS"
+    }).catch(console.error);
+
     res.json({ ok: true, message: 'Allowance added' });
+
   } catch (err) {
     console.error(err);
+
+    logAudit({
+      user_id: req.user?.id,
+      action_type: "CREATE",
+      target_table: "allowances",
+      target_id: null,
+      before_state: null,
+      after_state: req.body,
+      req,
+      status: "FAILURE"
+    }).catch(console.error);
+
     res.status(500).json({ ok: false, message: 'Failed to add allowance' });
   }
 };
@@ -828,6 +1109,14 @@ const updateAllowance = async (req, res) => {
       return res.status(404).json({ ok: false, message: 'Allowance not found' });
     }
 
+    logAudit({
+      user_id: req.user.id,
+      action_type: "UPDATE_ALLOWANCE",
+      target_table: "allowances",
+      target_id: result.insertId,
+      description: `Allowance updated (id=${id}, employee_id=${employee_id}, amount=${amount})`
+    });
+
     res.json({ ok: true, message: 'Allowance updated successfully' });
   } catch (err) {
     console.error('updateAllowance error:', err);
@@ -839,16 +1128,40 @@ const updateAllowance = async (req, res) => {
 const deleteAllowance = async (req, res) => {
   try {
     const { id } = req.params;
-    
-    const [result] = await pool.query('DELETE FROM allowances WHERE id = ?', [id]);
-    
-    if (result.affectedRows === 0) {
+    const [[before]] = await pool.query('SELECT * FROM allowances WHERE id = ?', [id]);
+    if (!before) {
       return res.status(404).json({ ok: false, message: 'Allowance not found' });
     }
-    
+
+    const [result] = await pool.query('DELETE FROM allowances WHERE id = ?', [id]);
+    // Add audit log
+    logAudit({
+      user_id: req.user.id,
+      action_type: "DELETE_ALLOWANCE",
+      target_table: "allowances",
+      target_id: id,
+      before_state: before,
+      after_state: null,
+      req,
+      status: "SUCCESS"
+    });
     res.json({ ok: true, message: 'Allowance deleted successfully' });
   } catch (err) {
     console.error('deleteAllowance error:', err);
+
+    if (req.user) {
+      logAudit({
+        user_id: req.user.id,
+        action_type: "DELETE_ALLOWANCE",
+        target_table: "allowances",
+        target_id: req.params.id,
+        before_state: null,
+        after_state: null,
+        req,
+        status: "FAILURE"
+      });
+    }
+
     res.status(500).json({ ok: false, message: 'Failed to delete allowance' });
   }
 };
@@ -870,6 +1183,7 @@ const addBonus = async (req, res) => {
 /* ===================== EARNINGS GRID ===================== */
 
 const listEarnings = async (req, res) => {
+  try {
   const { month, year } = req.query; // optional
   const [emps] = await pool.query(`
     SELECT e.id, e.full_name, d.name AS department, s.basic_salary
@@ -946,6 +1260,22 @@ const listEarnings = async (req, res) => {
   });
 
   res.json({ ok: true, data });
+
+  } catch (err) {
+    console.error('listEarnings error:', err);
+    logEvent({
+      level: 'error', event_type: "GET_EARNING_LIST_FAILED",
+      user_id: req.user?.id || null,
+      severity: "ERROR",
+      event_details: {
+        month: req.query.month || 'all',
+        year: req.query.year || 'all',
+        error: err.message
+      }
+    })
+
+    res.status(500).json({ ok: false, message: 'Failed to fetch earnings' });
+  }
 };
 
 /* ===================== MONTH SUMMARY & RUN ===================== */
@@ -1062,7 +1392,7 @@ const monthSummary = async (req, res) => {
       const bonus       = B[e.employee_id] || 0;
       const gross       = basic + allowances + overtime + bonus;
       const totalDeductions = D[e.employee_id] || 0;
-      const net         = gross - totalDeductions;
+      const net = gross - totalDeductions;
 
       return {
         employee_id     : e.employee_id,
@@ -1113,7 +1443,13 @@ const runPayrollForMonth = async (req, res) => {
   } catch (e) {
     await conn.rollback();
     console.error(e);
-    return res.status(500).json({ ok:false, message:'Failed to run payroll' });
+    logEvent({
+      level: 'error', event_type: "RUN_PAYROLL_FAILED",
+      user_id: req.user?.id || null,
+      severity: "ERROR",
+      event_details: { error: e.message, month, year }
+    })
+    return res.status(500).json({ ok: false, message: 'Failed to run payroll' });
   } finally {
     conn.release();
   }
@@ -1124,6 +1460,7 @@ const runPayrollForMonth = async (req, res) => {
 /* ===================== PAYSLIP ===================== */
 
 const generatePayslip = async (req, res) => {
+  try {
   const { employee_id, month, year } = req.query;
   if (!employee_id || !month || !year) {
     return res.status(400).json({ ok: false, message: 'employee_id, month, year required' });
@@ -1185,6 +1522,14 @@ const generatePayslip = async (req, res) => {
     [employee_id, month, year, gross, dedTotal, net]
   );
 
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: 'GENERATE_PAYSLIP',
+      target_table: 'payroll_cycles',
+      target_id: payrollResult.insertId,
+      after_state: { employee_id, month, year, gross, total_deductions: dedTotal, net },
+    });
+
   const doc = new PDFDocument();
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="payslip_${emp.full_name}_${month}_${year}.pdf"`);
@@ -1211,6 +1556,17 @@ const generatePayslip = async (req, res) => {
   doc.text(`Total Deductions: ${dedTotal.toFixed(2)}`);
   doc.text(`Net Salary: ${net.toFixed(2)}`, { underline: true });
   doc.end();
+
+  } catch (err) {
+    console.error('generatePayslip error:', err);
+    logEvent({
+      level: 'error', event_type: "GENERATE_PAYSLIP_FAILED",
+      user_id: req.user?.id || null,
+      severity: "ERROR",
+      event_details: { error: err.message, query: req.query }
+    })
+    res.status(500).json({ ok: false, message: 'Failed to generate payslip' });
+  }
 };
 
 /* ===================== EXPORTS ===================== */
