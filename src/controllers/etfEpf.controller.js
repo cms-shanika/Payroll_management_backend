@@ -1,7 +1,7 @@
 // src/controllers/etfEpf.controller.js
 const pool = require('../config/db');
-const logAudit = require('../utils/audit');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
+const logAudit = require('../services/logAudit');
 
 // ===================== ETF/EPF MANAGEMENT =====================
 
