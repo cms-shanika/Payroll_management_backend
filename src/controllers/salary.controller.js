@@ -43,8 +43,7 @@ const getGrades = async (_req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error(err);
-    logEvent({
-      level: 'error', event_type: "GET_GRADES",
+    logEvent({ level: 'error', event_type: "GET_GRADES",
       user_id: req.user?.id || null,
       event_details: {},
       status: "FAILURE",
@@ -94,8 +93,7 @@ const getOvertimeRulesByGrade = async (req, res) => {
     res.json(rows[0] || null);
   } catch (err) {
     console.error('getOvertimeRulesByGrade error:', err);
-    logEvent({
-      level: 'error', event_type: "GET_OVER_TIME_RULES_BY_GRADE_ERROR",
+    logEvent({ level: 'error', event_type: "GET_OVER_TIME_RULES_BY_GRADE_ERROR",
       user_id: user?.id || null,
       event_details: {
         email,
@@ -285,8 +283,7 @@ const listOvertimeAdjustmentsByGrade = async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('listOvertimeAdjustmentsByGrade error:', err);
-    logEvent({
-      level: 'error', event_type: "GET_OVER_TIME_ADJUSTMENT_BY_GRADE",
+    logEvent({ level: 'error', event_type: "GET_OVER_TIME_ADJUSTMENT_BY_GRADE",
       user_id: req.user.id,
       error_message: err.message,
       event_details: { err }
@@ -331,8 +328,7 @@ const listOvertimeAdjustmentsByEmployee = async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('listOvertimeAdjustmentsByEmployee error:', err);
-    logEvent({
-      level: 'error', event_type: "GET_OVER_TIME_ADJUSTMENT_BY_EMPLOYEE",
+    logEvent({ level: 'error', event_type: "GET_OVER_TIME_ADJUSTMENT_BY_EMPLOYEE",
       user_id: req.user.id,
       error_message: err.message,
       event_details: { err }
@@ -394,8 +390,7 @@ const searchEmployeesAdvanced = async (req, res) => {
     res.json({ ok:true, data: rows });
   } catch (err) {
     console.error('searchEmployeesAdvanced error:', err);
-    logEvent({
-      level: 'error', event_type: "SEARCH_EMPLOYEE_ADVANCES",
+    logEvent({ level: 'error', event_type: "SEARCH_EMPLOYEE_ADVANCES",
       user_id: req.user.id,
       error_message: err.message,
       event_details: { err }
@@ -414,8 +409,7 @@ const listDepartments = async (_req, res) => {
     res.json({ ok:true, data: rows });
   } catch (err) {
     console.error('listDepartments error:', err);
-    logEvent({
-      level: 'info', event_type: "LIST_DEPARTMENTS",
+    logEvent({ level: 'info', event_type: "LIST_DEPARTMENTS",
       user_id: _req.user.id,
       error_message: err.message,
       event_details: { err }
@@ -475,8 +469,7 @@ const previewCompensation = async (req, res) => {
     });
   } catch (err) {
     console.error('previewCompensation error:', err);
-    logEvent({
-      level: 'error', event_type: "PREVIEW_COMPENSATION",
+    logEvent({ level: 'error', event_type: "PREVIEW_COMPENSATION",
       user_id: req.user.id,
       error_message: err.message,
       event_details: { err }
@@ -639,8 +632,7 @@ const listAllowances = async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    logEvent({
-      level: 'error', event_type: "GET_ALLOWANCE_LIST_FAILED",
+    logEvent({ level: 'error', event_type: "GET_ALLOWANCE_LIST_FAILED",
       user_id: req.user?.id,
       severity: "ERROR",
       event_details: { error: err.message }
@@ -663,8 +655,7 @@ const listOvertime = async (req, res) => {
     res.json({ ok: true, data: rows });
   } catch (err) {
     console.error(err);
-    logEvent({
-      level: 'error', event_type: "GET_OVERTIME_LIST_FAILED",
+    logEvent({ level: 'error', event_type: "GET_OVERTIME_LIST_FAILED",
       user_id: req.user?.id,
       severity: "ERROR",
       event_details: { error: err.message }
@@ -700,8 +691,7 @@ const listDeductions = async (req, res) => {
     res.json({ ok: true, data: rows });
   } catch (err) {
     console.error(err);
-    logEvent({
-      level: 'error', event_type: "GET_DEDUCTIONS_LIST_FAILED",
+    logEvent({ level: 'error', event_type: "GET_DEDUCTIONS_LIST_FAILED",
       user_id: req.user?.id,
       severity: "ERROR",
       event_details: { error: err.message }
@@ -790,8 +780,7 @@ const getDeductionById = async (req, res) => {
     res.json({ ok: true, data: row });
   } catch (err) {
     console.error(err);
-    logEvent({
-      level: 'error', event_type: "GET_DEDUCTION_BYID",
+    logEvent({ level: 'error', event_type: "GET_DEDUCTION_BYID",
       user_id: req.user.id,
       error_message: err.message,
       event_details: { err }
@@ -937,8 +926,7 @@ const getBasicSalary = async (req, res) => {
     res.json({ basic_salary: row?.basic_salary || 0 });
   } catch (err) {
     console.error('getBasicSalary error:', err);
-    logEvent({
-      level: 'error', event_type: "GET_OVERTIME_LIST_FAILED",
+    logEvent({ level: 'error', event_type: "GET_OVERTIME_LIST_FAILED",
       user_id: req.user?.id || null,
       severity: "ERROR",
       event_details: { error: err.message }
@@ -1263,8 +1251,7 @@ const listEarnings = async (req, res) => {
 
   } catch (err) {
     console.error('listEarnings error:', err);
-    logEvent({
-      level: 'error', event_type: "GET_EARNING_LIST_FAILED",
+    logEvent({ level: 'error', event_type: "GET_EARNING_LIST_FAILED",
       user_id: req.user?.id || null,
       severity: "ERROR",
       event_details: {
@@ -1443,8 +1430,7 @@ const runPayrollForMonth = async (req, res) => {
   } catch (e) {
     await conn.rollback();
     console.error(e);
-    logEvent({
-      level: 'error', event_type: "RUN_PAYROLL_FAILED",
+    logEvent({ level: 'error', event_type: "RUN_PAYROLL_FAILED",
       user_id: req.user?.id || null,
       severity: "ERROR",
       event_details: { error: e.message, month, year }
@@ -1559,8 +1545,7 @@ const generatePayslip = async (req, res) => {
 
   } catch (err) {
     console.error('generatePayslip error:', err);
-    logEvent({
-      level: 'error', event_type: "GENERATE_PAYSLIP_FAILED",
+    logEvent({ level: 'error', event_type: "GENERATE_PAYSLIP_FAILED",
       user_id: req.user?.id || null,
       severity: "ERROR",
       event_details: { error: err.message, query: req.query }
