@@ -13,6 +13,8 @@ const departmentRoutes = require('./routes/department.routes');
 const reportRoutes = require('./routes/report.route');
 const attendanceRoutes = require('./routes/attendance.routes');
 const leaveRoutes = require('./routes/leave.routes');
+const contractsRoutes = require('./routes/contracts.routes');   // ⬅ add this
+
 
 
 const app = express();
@@ -41,6 +43,13 @@ app.use('/api/departments', departmentRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/leaves', leaveRoutes);
+
+app.use('/api/auth', authRoutes);
+app.use('/api/employees', employeeRoutes);
+app.use('/api/salary', salaryRoutes);
+app.use('/api/departments', departmentRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/contracts-docs', contractsRoutes);      
 
 app.get('/health', (_req, res) => res.json({ ok:true, status:'UP' }));
 app.use((req,res)=>res.status(404).json({ ok:false, message: 'Route not found'}));

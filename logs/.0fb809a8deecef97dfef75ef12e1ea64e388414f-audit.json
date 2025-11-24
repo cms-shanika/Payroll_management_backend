@@ -9,6 +9,16 @@
             "date": 1763093200906,
             "name": "logs\\2025-11-14-events.log",
             "hash": "2ef858fed5ad3d33a959a91a8f91c6df"
+        },
+        {
+            "date": 1763791221103,
+            "name": "logs\\2025-11-22-events.log",
+            "hash": "e90d4f20ea23dedd7ee48e4cfbc6e6e1"
+        },
+        {
+            "date": 1763950356294,
+            "name": "logs\\2025-11-24-events.log",
+            "hash": "9db1e032739f5c25679ed171f414de7f"
         }
     ]
 }
