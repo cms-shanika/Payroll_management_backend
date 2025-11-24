@@ -2,28 +2,55 @@
 const pool = require('../config/db');
 const path = require('path');
 const fs = require('fs');
-
+const logAudit = require('../utils/audit');
+const logEvent = require('../utils/event');
 
 function baseUrl(req) {
   return process.env.BACKEND_PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
 }
+
 function toUrl(req, filePath) {
   if (!filePath) return null;
-  const filename = String(filePath).split(/[/\\]/).pop();
+
+  // normalize
+  const normalized = String(filePath).replace(/\\/g, '/');
+
+  // If DB has full path like ".../uploads/12345_pic.jpg"
+  const idx = normalized.toLowerCase().lastIndexOf('/uploads/');
+  if (idx !== -1) {
+    const rel = normalized.slice(idx + 1); // "uploads/12345_pic.jpg"
+    return `${baseUrl(req)}/${rel}`;
+  }
+
+  // New style: DB has only filename "12345_pic.jpg"
+  const filename = normalized.split('/').pop();
   return `${baseUrl(req)}/uploads/${filename}`;
 }
+
 function kindFromType(t = '') {
   if (t.startsWith('image/')) return 'image';
   if (t === 'application/pdf') return 'pdf';
   return 'file';
 }
+
 function extractCategory(file_name = '') {
   // we store "Category::original.ext" for personal documents (no DB change needed)
   const m = String(file_name).match(/^([^:]+)::/);
   return m ? m[1] : null;
 }
+
 function stripCategoryPrefix(name = '') {
   return String(name).replace(/^[^:]+::/, '');
+}
+
+// map grade letter → grade_id
+function gradeToId(grade) {
+  if (!grade) return null;
+  const g = String(grade).trim().toUpperCase();
+  if (g === 'A') return 1;
+  if (g === 'B') return 2;
+  if (g === 'C') return 3;
+  return null;
 }
 
 // helper: get or create department by name
@@ -53,7 +80,10 @@ exports.createEmployee = async (req, res) => {
     kin_name, relationship, kin_nic, kin_dob,
   } = req.body;
 
-  const profilePhotoPath = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g, '/');
+  // only store file *name* in DB, not full disk path
+  const profilePhotoFile = req.files?.profilePhoto?.[0];
+  const profilePhotoPath = profilePhotoFile ? profilePhotoFile.filename : null;
+
   const generalDocs = Array.isArray(req.files?.documents) ? req.files.documents : [];
   const bankDoc = req.files?.bankDocument?.[0];
 
@@ -62,7 +92,12 @@ exports.createEmployee = async (req, res) => {
     await conn.beginTransaction();
 
     const department_id = await getOrCreateDepartmentId(conn, department);
-    const full_name = [first_name, last_name].filter(Boolean).join(' ').trim() || calling_name || email;
+    const grade_id = gradeToId(grade);
+
+    const full_name =
+      [first_name, last_name].filter(Boolean).join(' ').trim() ||
+      calling_name ||
+      email;
 
     const [empIns] = await conn.query(
       `INSERT INTO employees
@@ -72,20 +107,44 @@ exports.createEmployee = async (req, res) => {
         profile_photo_path, created_by_user_id,
         first_name, last_name, initials, calling_name,
         gender, dob, marital_status, nationality, religion, nic,
-        working_office, branch, employment_type, supervisor, grade, designated_emails, epf_no)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-               ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        working_office, branch, employment_type, supervisor, grade, designated_emails, epf_no, grade_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
-        null, full_name, email || null, personal_email || null,
-        phone || null, country_code || null,
-        department_id, designation || null, status || 'Active',
-        appointment_date || null, appointment_date || null,
-        address_permanent || null, address_permanent || null, address_temporary || null,
-        null, profilePhotoPath || null, (req.user && req.user.id) || 1,
-        first_name || null, last_name || null, initials || null, calling_name || null,
-        gender || null, dob || null, marital_status || null, nationality || null, religion || null, nic || null,
-        working_office || null, branch || null, employment_type || null, supervisor || null, grade || null,
-        designated_emails || null, epf_no || null,
+        null,                       // employee_code
+        full_name,
+        email || null,
+        personal_email || null,
+        phone || null,
+        country_code || null,
+        department_id,
+        designation || null,
+        status || 'Active',
+        appointment_date || null,   // joining_date
+        appointment_date || null,   // appointment_date
+        address_permanent || null,  // address
+        address_permanent || null,
+        address_temporary || null,
+        null,                       // emergency_contact
+        profilePhotoPath || null,
+        (req.user && req.user.id) || 1,
+        first_name || null,
+        last_name || null,
+        initials || null,
+        calling_name || null,
+        gender || null,
+        dob || null,
+        marital_status || null,
+        nationality || null,
+        religion || null,
+        nic || null,
+        working_office || null,
+        branch || null,
+        employment_type || null,
+        supervisor || null,
+        grade || null,
+        designated_emails || null,
+        epf_no || null,
+        grade_id || null,
       ]
     );
     const employeeId = empIns.insertId;
@@ -114,9 +173,15 @@ exports.createEmployee = async (req, res) => {
       );
     }
 
-    // Save documents. We keep the selected category in the file_name prefix "Category::original.ext"
-    const category = (req.body.document_type || '').trim();
-    for (const f of generalDocs) {
+    // ---- DOCUMENTS ----
+    // Frontend sends documents[] plus document_type_0, document_type_1, ... and total_documents
+    const totalDocs = Number(req.body.total_documents || generalDocs.length || 0);
+    // totalDocs is kept for future checks if needed
+
+    for (let i = 0; i < generalDocs.length; i++) {
+      const f = generalDocs[i];
+      const typeKey = `document_type_${i}`;
+      const category = (req.body[typeKey] || '').trim(); // e.g. "NIC Copy"
       const original = f.originalname;
       const storedName = category ? `${category}::${original}` : original;
       await conn.query(
@@ -124,18 +189,61 @@ exports.createEmployee = async (req, res) => {
         [employeeId, storedName, f.path.replace(/\\/g, '/'), f.mimetype]
       );
     }
+
+    // Bank document: store with category "Bank Document"
     if (bankDoc) {
+      const original = bankDoc.originalname;
+      const storedName = `Bank Document::${original}`;
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
-        [employeeId, `BANK-${bankDoc.originalname}`, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
+        [employeeId, storedName, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
       );
     }
 
     await conn.commit();
+
+    const after_state = {
+      employee_id: employeeId,
+      full_name,
+      email,
+      department_id,
+      designation,
+      employment_type,
+      basic_salary: Number(basic_salary) || null,
+      supervisor,
+      grade,
+      has_documents: generalDocs.length > 0 || !!bankDoc,
+      has_kin: !!kin_name,
+      has_bank_account: !!account_number
+    };
+
+    logAudit({
+      user_id: req.user.id,
+      action_type: "CREATE_EMPLOYEE",
+      target_table: "employees",
+      target_id: employeeId,
+      before_state: null,
+      after_state,
+      req,
+      status: "SUCCESS"
+    });
+
+
     res.status(201).json({ ok: true, id: employeeId, message: 'Employee created' });
   } catch (e) {
     await conn.rollback();
     console.error(e);
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: "CREATE_EMPLOYEE",
+      target_table: "employees",
+      target_id: null,
+      before_state: null,
+      after_state: null,
+      req,
+      status: "FAILURE",
+      error_message: e.message
+    }).catch(() => { });
     res.status(500).json({ ok: false, message: 'Failed to create employee' });
   } finally {
     conn.release();
@@ -143,72 +251,94 @@ exports.createEmployee = async (req, res) => {
 };
 
 exports.getEmployees = async (req, res) => {
-  const [rows] = await pool.query(
-    `SELECT e.*, d.name AS department_name
+  try {
+    const [rows] = await pool.query(
+      `SELECT e.*, d.name AS department_name
      FROM employees e
      LEFT JOIN departments d ON d.id = e.department_id
      ORDER BY e.created_at DESC`
-  );
-  // add profile_photo_url for listing
-  for (const r of rows) {
-    r.profile_photo_url = r.profile_photo_path ? toUrl(req, r.profile_photo_path) : null;
+    );
+    // add profile_photo_url for listing
+    for (const r of rows) {
+      r.profile_photo_url = r.profile_photo_path ? toUrl(req, r.profile_photo_path) : null;
+    }
+    res.json({ ok: true, data: rows });
+
+  } catch (error) {
+    logEvent({ level: "error", event_type: "GET_EMPLOYEES_FAILURE", user_id: req.user?.id || null, event_details: { error }, error_message: error.message })
+    res.status(500).json({ ok: false, message: "Failed to fetch employees" });
   }
-  res.json({ ok: true, data: rows });
 };
 
 exports.getEmployeeById = async (req, res) => {
-  const id = Number(req.params.id);
-  const [[emp]] = await pool.query(
-    `SELECT e.*, d.name AS department_name
+  try {
+    const id = Number(req.params.id);
+    const [[emp]] = await pool.query(
+      `SELECT e.*, d.name AS department_name
      FROM employees e
      LEFT JOIN departments d ON d.id = e.department_id
      WHERE e.id = ?`,
-    [id]
-  );
-  if (!emp) return res.status(404).json({ ok: false, message: 'Not found' });
+      [id]
+    );
+    if (!emp) return res.status(404).json({ ok: false, message: 'Not found' });
 
-  const [docs] = await pool.query(
-    'SELECT id, file_name, file_path, file_type, uploaded_at FROM employee_documents WHERE employee_id = ? ORDER BY id DESC',
-    [id]
-  );
-  const [[kin]] = await pool.query('SELECT * FROM employee_kin WHERE employee_id = ? LIMIT 1', [id]);
-  const [[bank]] = await pool.query('SELECT * FROM employee_bank_accounts WHERE employee_id = ? LIMIT 1', [id]);
-  const [[sal]]  = await pool.query('SELECT basic_salary FROM salaries WHERE employee_id = ? ORDER BY id DESC LIMIT 1', [id]);
+    const [docs] = await pool.query(
+      'SELECT id, file_name, file_path, file_type, uploaded_at FROM employee_documents WHERE employee_id = ? ORDER BY id DESC',
+      [id]
+    );
+    const [[kin]] = await pool.query('SELECT * FROM employee_kin WHERE employee_id = ? LIMIT 1', [id]);
+    const [[bank]] = await pool.query('SELECT * FROM employee_bank_accounts WHERE employee_id = ? LIMIT 1', [id]);
+    const [[sal]] = await pool.query('SELECT basic_salary FROM salaries WHERE employee_id = ? ORDER BY id DESC LIMIT 1', [id]);
 
-  emp.kin = kin || null;
-  emp.bank_account = bank || null;
-  emp.basic_salary = sal ? sal.basic_salary : null;
+    emp.kin = kin || null;
+    emp.bank_account = bank || null;
+    emp.basic_salary = sal ? sal.basic_salary : null;
 
-  emp.documents = (docs || []).map(d => {
-    const url = toUrl(req, d.file_path);
-    const category = extractCategory(d.file_name);
-    const cleanName = stripCategoryPrefix(d.file_name);
-    return {
-      ...d,
-      file_name: cleanName,
-      file_path: d.file_path,
-      url,
-      kind: kindFromType(d.file_type),
-      doc_category: category,            // <-- used by FE
-    };
-  });
+    emp.documents = (docs || []).map(d => {
+      const url = toUrl(req, d.file_path);
+      const category = extractCategory(d.file_name);
+      const cleanName = stripCategoryPrefix(d.file_name);
+      return {
+        ...d,
+        file_name: cleanName,
+        file_path: d.file_path,
+        url,
+        kind: kindFromType(d.file_type),
+        doc_category: category,            // <-- used by FE
+      };
+    });
 
-  emp.profile_photo_url = emp.profile_photo_path ? toUrl(req, emp.profile_photo_path) : null;
+    emp.profile_photo_url = emp.profile_photo_path ? toUrl(req, emp.profile_photo_path) : null;
 
-  res.json({ ok: true, data: emp });
+    res.json({ ok: true, data: emp });
+  } catch (error) {
+    logEvent({ level: "error", event_type: "GET_EMPLOYEE_FAILED", user_id: req.user?.id || null, event_details: { error }, error_message: error.message })
+
+    res.status(500).json({ ok: false, message: "Failed to fetch employee" });
+  }
 };
 
 exports.updateEmployee = async (req, res) => {
   const id = Number(req.params.id);
 
   const body = req.body || {};
-  const profilePhotoPath = req.files?.profilePhoto?.[0]?.path?.replace(/\\/g, '/');
+  const profilePhotoFile = req.files?.profilePhoto?.[0];
+  const profilePhotoPath = profilePhotoFile ? profilePhotoFile.filename : undefined;
   const generalDocs = Array.isArray(req.files?.documents) ? req.files.documents : [];
   const bankDoc = req.files?.bankDocument?.[0];
 
   const conn = await pool.getConnection();
+
+  let before_state = null;
   try {
     await conn.beginTransaction();
+    // Get BEFORE state
+    const [beforeRows] = await conn.query('SELECT * FROM employees WHERE id = ?', [id]);
+    if (!beforeRows.length) {
+      await conn.rollback();
+      return res.status(404).json({ ok: false, message: 'Not found' });
+    }
+    const before_state = beforeRows[0];
 
     let department_id = null;
     if (body.department || body.department_name) {
@@ -220,6 +350,14 @@ exports.updateEmployee = async (req, res) => {
       const fn = body.first_name || '';
       const ln = body.last_name || '';
       full_name = [fn, ln].filter(Boolean).join(' ').trim() || undefined;
+    }
+
+    // derive grade_id either from explicit grade_id or from grade letter
+    let grade_id_val = undefined;
+    if (Object.prototype.hasOwnProperty.call(body, 'grade_id')) {
+      grade_id_val = body.grade_id ? Number(body.grade_id) || null : null;
+    } else if (body.grade) {
+      grade_id_val = gradeToId(body.grade);
     }
 
     const fields = {
@@ -255,6 +393,7 @@ exports.updateEmployee = async (req, res) => {
       employment_type: body.employment_type,
       supervisor: body.supervisor,
       grade: body.grade,
+      grade_id: grade_id_val,
       designated_emails: body.designated_emails,
       epf_no: body.epf_no,
 
@@ -285,28 +424,65 @@ exports.updateEmployee = async (req, res) => {
       await conn.query('INSERT INTO salaries (employee_id, basic_salary) VALUES (?, ?)', [id, Number(body.basic_salary)]);
     }
 
-    // docs
-    const category = (body.document_type || '').trim();
-    for (const f of generalDocs) {
+    // ---- DOCUMENTS ----
+    const totalDocs = Number(req.body.total_documents || generalDocs.length || 0);
+    // totalDocs is kept for future checks if needed
+
+    for (let i = 0; i < generalDocs.length; i++) {
+      const f = generalDocs[i];
+      const typeKey = `document_type_${i}`;
+      const category = (req.body[typeKey] || '').trim();
       const original = f.originalname;
       const storedName = category ? `${category}::${original}` : original;
+
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
         [id, storedName, f.path.replace(/\\/g, '/'), f.mimetype]
       );
     }
+
     if (bankDoc) {
+      const original = bankDoc.originalname;
+      const storedName = `Bank Document::${original}`;
       await conn.query(
         'INSERT INTO employee_documents (employee_id, file_name, file_path, file_type) VALUES (?,?,?,?)',
-        [id, `BANK-${bankDoc.originalname}`, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
+        [id, storedName, bankDoc.path.replace(/\\/g, '/'), bankDoc.mimetype]
       );
     }
 
     await conn.commit();
+
+    // Get AFTER state
+    const [afterRows] = await conn.query('SELECT * FROM employees WHERE id = ?', [id]);
+    const after_state = afterRows[0];
+
+    // Audit log
+    logAudit({
+      user_id: req.user.id,
+      action_type: "UPDATE_EMPLOYEE",
+      target_table: "employees",
+      target_id: id,
+      before_state: before_state,
+      after_state: after_state,
+      req,
+      status: "SUCCESS"
+    });
+
     res.json({ ok: true, message: 'Updated' });
   } catch (e) {
     await conn.rollback();
     console.error(e);
+    logAudit({
+      user_id: req.user.id,
+      action_type: "UPDATE_EMPLOYEE",
+      target_table: "employees",
+      target_id: id,
+      before_state: before_state || null,
+      after_state: null,
+      req,
+      status: "FAILURE",
+      error_message: e.message
+    }).catch(() => { });
     res.status(500).json({ ok: false, message: 'Failed to update employee' });
   } finally {
     conn.release();
@@ -314,10 +490,52 @@ exports.updateEmployee = async (req, res) => {
 };
 
 exports.deleteEmployee = async (req, res) => {
+  const conn = await pool.getConnection();
   const id = Number(req.params.id);
-  const [r] = await pool.query('DELETE FROM employees WHERE id = ?', [id]);
-  if (!r.affectedRows) return res.status(404).json({ ok: false, message: 'Not found' });
-  res.json({ ok: true, message: 'Deleted' });
+  try {
+    await conn.beginTransaction();
+
+    const [[before_state]] = await conn.query('SELECT * FROM employees WHERE id = ?', [id]);
+    if (!before_state) throw new Error('Not found');
+
+    await conn.query('DELETE FROM salaries WHERE employee_id = ?', [id]);
+    await conn.query('DELETE FROM employee_kin WHERE employee_id = ?', [id]);
+    await conn.query('DELETE FROM employee_bank_accounts WHERE employee_id = ?', [id]);
+    await conn.query('DELETE FROM employee_documents WHERE employee_id = ?', [id]);
+    await conn.query('DELETE FROM employees WHERE id = ?', [id]);
+
+    logAudit({
+      user_id: req.user.id,
+      action_type: "DELETE_EMPLOYEE",
+      target_table: "employees",
+      target_id: id,
+      before_state,
+      after_state: null,
+      req,
+      status: "SUCCESS"
+    });
+
+    await conn.commit();
+    res.json({ ok: true, message: 'Deleted' });
+  } catch (err) {
+    await conn.rollback();
+    console.error(err);
+    logAudit({
+      user_id: req.user.id,
+      action_type: "DELETE_EMPLOYEE",
+      target_table: "employees",
+      target_id: id,
+      before_state: before_state || null,
+      after_state: null, // fixed typo
+      req,
+      status: "FAILURE",
+      error_message: e.message
+    }).catch(() => { });
+    res.status(500).json({ ok: false, message: 'Failed to delete employee' });
+  } finally {
+    conn.release();
+  }
+
 };
 
 // ---------- NEW: per-document delete/replace ----------
@@ -326,42 +544,130 @@ exports.deleteEmployeeDocument = async (req, res) => {
   const empId = Number(req.params.id);
   const docId = Number(req.params.docId);
 
-  const [[doc]] = await pool.query(
-    'SELECT file_path FROM employee_documents WHERE id = ? AND employee_id = ?',
-    [docId, empId]
-  );
-  if (!doc) return res.status(404).json({ ok:false, message:'Document not found' });
-
-  await pool.query('DELETE FROM employee_documents WHERE id = ? AND employee_id = ?', [docId, empId]);
+  let before_state = null;
 
   try {
-    fs.unlinkSync(path.resolve(doc.file_path));
-  } catch (_) {}
-  res.json({ ok:true, message:'Document deleted' });
+    const [[doc]] = await pool.query(
+      'SELECT file_path FROM employee_documents WHERE id = ? AND employee_id = ?',
+      [docId, empId]
+    );
+    if (!doc) return res.status(404).json({ ok: false, message: 'Document not found' });
+
+
+    before_state = doc;
+
+    await pool.query('DELETE FROM employee_documents WHERE id = ? AND employee_id = ?', [docId, empId]);
+
+    try {
+      fs.unlinkSync(path.resolve(doc.file_path));
+    } catch (_) { }
+
+    // Audit (SUCCESS)
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: "DELETE_EMPLOYEE_DOCUMENT",
+      target_table: "employee_documents",
+      target_id: docId,
+      before_state,
+      after_state: null,
+      req,
+      status: "SUCCESS"
+    });
+
+    res.json({ ok: true, message: 'Document deleted' });
+
+  } catch (e) {
+    console.error(e);
+
+    // Audit (FAILURE)
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: "DELETE_EMPLOYEE_DOCUMENT",
+      target_table: "employee_documents",
+      target_id: docId,
+      before_state,
+      after_state: null,
+      req,
+      status: "FAILURE",
+      error_message: e.message
+    }).catch(() => { });
+
+    res.status(500).json({ ok: false, message: 'Failed to delete document' });
+  }
 };
+
 
 exports.replaceEmployeeDocument = async (req, res) => {
   const empId = Number(req.params.id);
   const docId = Number(req.params.docId);
   const f = req.file;
-  if (!f) return res.status(400).json({ ok:false, message:'file required' });
 
-  const [[doc]] = await pool.query(
-    'SELECT file_path FROM employee_documents WHERE id = ? AND employee_id = ?',
-    [docId, empId]
-  );
-  if (!doc) return res.status(404).json({ ok:false, message:'Document not found' });
+  if (!f) return res.status(400).json({ ok: false, message: 'file required' });
 
-  await pool.query(
-    'UPDATE employee_documents SET file_name = ?, file_path = ?, file_type = ? WHERE id = ? AND employee_id = ?',
-    [f.originalname, f.path.replace(/\\/g, '/'), f.mimetype, docId, empId]
-  );
+  let before_state = null;
+  let after_state = null;
 
   try {
-    fs.unlinkSync(path.resolve(doc.file_path));
-  } catch (_) {}
+    const [[doc]] = await pool.query(
+      'SELECT file_path FROM employee_documents WHERE id = ? AND employee_id = ?',
+      [docId, empId]
+    );
+    if (!doc) return res.status(404).json({ ok: false, message: 'Document not found' });
 
-  res.json({ ok:true, message:'Document replaced' });
+
+    before_state = doc;
+
+    // Update file
+    await pool.query(
+      'UPDATE employee_documents SET file_name = ?, file_path = ?, file_type = ? WHERE id = ? AND employee_id = ?',
+      [f.originalname, f.path.replace(/\\/g, '/'), f.mimetype, docId, empId]
+    );
+
+
+    // Fetch after state
+    const [[updatedDoc]] = await pool.query(
+      'SELECT * FROM employee_documents WHERE id = ? AND employee_id = ?',
+      [docId, empId]
+    );
+    after_state = updatedDoc;
+
+    try {
+      fs.unlinkSync(path.resolve(doc.file_path));
+    } catch (_) { }
+
+
+    // Audit (SUCCESS)
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: "REPLACE_EMPLOYEE_DOCUMENT",
+      target_table: "employee_documents",
+      target_id: docId,
+      before_state,
+      after_state,
+      status: "SUCCESS",
+      req
+    });
+
+    res.json({ ok: true, message: 'Document replaced' });
+
+  } catch (e) {
+    console.error(e);
+
+    // Audit (FAILURE)
+    logAudit({
+      user_id: req.user?.id || null,
+      action_type: "REPLACE_EMPLOYEE_DOCUMENT",
+      target_table: "employee_documents",
+      target_id: docId,
+      before_state,
+      after_state: null,
+      status: "FAILURE",
+      error_message: e.message,
+      req
+    }).catch(() => { });
+
+    res.status(500).json({ ok: false, message: 'Failed to replace document' });
+  }
 };
 
 

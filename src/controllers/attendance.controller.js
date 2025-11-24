@@ -300,7 +300,9 @@ exports.getAbsenceReport = async (req, res) => {
         
         let query = `
             SELECT 
-                ar.date,
+                e.employee_code AS empNo, 
+                e.id AS employee_id,
+                ar.date,    
                 e.full_name,
                 COALESCE(e.department_name, d.name) AS department_name,
                 e.designation,
@@ -342,46 +344,50 @@ exports.getAbsenceReport = async (req, res) => {
     }
 };
 
+// Reports
 exports.getCheckinCheckoutReport = async (req, res) => {
-    try {
-        const { startDate, endDate, department } = req.query;
-        
-        let query = `
-            SELECT 
-            e.employee_code AS empNo,
-            ar.date, 
-            e.full_name, 
-            e.department_name, 
-            e.designation, 
-            ar.check_in_time, 
-            
-            ar.check_out_time, ar.total_hours, 
-            ar.overtime_hours, ar.status
+  try {
+    const { startDate, endDate, department } = req.query;
 
-            FROM attendance_records ar
-            JOIN employees e ON ar.employee_id = e.id
-            WHERE ar.check_in_time IS NOT NULL
-        `;
-        const params = [];
-        
-        if (startDate) {
-            query += ' AND ar.date >= ?';
-            params.push(startDate);
-        }
-        if (endDate) {
-            query += ' AND ar.date <= ?';
-            params.push(endDate);
-        }
-        if (department) {
-            query += ' AND e.department_name = ?';
-            params.push(department);
-        }
-        
-        query += ' ORDER BY ar.date DESC, e.full_name';
-        
-        const [records] = await pool.query(query, params);
-        res.json({ ok: true, data: records });
-    } catch (error) {
-        res.status(500).json({ ok: false, message: error.message });
+    let query = `
+      SELECT 
+        ar.date,
+        ar.check_in_time,
+        ar.check_out_time,
+        ar.total_hours,
+        ar.overtime_hours,
+        ar.status,
+
+        e.id AS employee_id,
+        e.employee_code,      -- 🔥 keep the real employee code
+        e.full_name,
+        e.department_name,
+        e.designation
+      FROM attendance_records ar
+      JOIN employees e ON ar.employee_id = e.id
+      WHERE ar.check_in_time IS NOT NULL
+    `;
+    const params = [];
+
+    if (startDate) {
+      query += ' AND ar.date >= ?';
+      params.push(startDate);
     }
+    if (endDate) {
+      query += ' AND ar.date <= ?';
+      params.push(endDate);
+    }
+    if (department) {
+      query += ' AND e.department_name = ?';
+      params.push(department);
+    }
+
+    query += ' ORDER BY ar.date DESC, e.full_name';
+
+    const [records] = await pool.query(query, params);
+    return res.json({ ok: true, data: records });
+  } catch (error) {
+    console.error('getCheckinCheckoutReport error:', error);
+    return res.status(500).json({ ok: false, message: error.message });
+  }
 };

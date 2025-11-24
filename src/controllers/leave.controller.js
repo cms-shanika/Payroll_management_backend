@@ -283,7 +283,6 @@ exports.summary = async (req, res) => {
 };
 
 // 🔹 NEW: Employee leave balances for EmployeeLeaves.jsx
-// 🔹 Employee leave balances for EmployeeLeaves.jsx
 exports.employeeBalances = async (req, res) => {
   try {
     const year = parseInt(req.query.year || String(dayjs().year()), 10);
@@ -306,71 +305,27 @@ exports.employeeBalances = async (req, res) => {
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 
-    // 👉 Aggregate USED days from leave_requests (APPROVED, given year)
-    //    Aggregate ENTITLED days from leave_balances (if you have them)
     const [rows] = await pool.query(
       `SELECT
           e.id AS employee_id,
           e.employee_code,
           e.full_name,
           COALESCE(d.name, e.department_name) AS department_name,
-
-          -- used days, based on APPROVED requests in the selected year
-          SUM(
-            CASE
-              WHEN lr.status = 'APPROVED'
-                   AND YEAR(lr.start_date) = ?
-                   AND lt_req.name = 'Personal'
-              THEN lr.duration_hours
-              ELSE 0
-            END
-          ) / 8 AS annualUsed,
-
-          SUM(
-            CASE
-              WHEN lr.status = 'APPROVED'
-                   AND YEAR(lr.start_date) = ?
-                   AND lt_req.name = 'Sick'
-              THEN lr.duration_hours
-              ELSE 0
-            END
-          ) / 8 AS casualUsed,
-
-          -- entitled days (totals) from leave_balances if present
-          SUM(
-            CASE
-              WHEN lt_bal.name = 'Personal' THEN lb.entitled_days
-              ELSE 0
-            END
-          ) AS annualTotal,
-
-          SUM(
-            CASE
-              WHEN lt_bal.name = 'Sick' THEN lb.entitled_days
-              ELSE 0
-            END
-          ) AS casualTotal
-
+          SUM(CASE WHEN lt.name LIKE '%Annual%' THEN lb.used_days ELSE 0 END) AS annualUsed,
+          SUM(CASE WHEN lt.name LIKE '%Annual%' THEN lb.entitled_days ELSE 0 END) AS annualTotal,
+          SUM(CASE WHEN lt.name LIKE '%Casual%' THEN lb.used_days ELSE 0 END) AS casualUsed,
+          SUM(CASE WHEN lt.name LIKE '%Casual%' THEN lb.entitled_days ELSE 0 END) AS casualTotal
        FROM employees e
        LEFT JOIN departments d ON d.id = e.department_id
-
-       -- approved leave requests
-       LEFT JOIN leave_requests lr
-         ON lr.employee_id = e.id
-       LEFT JOIN leave_types lt_req
-         ON lt_req.id = lr.leave_type_id
-
-       -- leave entitlements (optional)
        LEFT JOIN leave_balances lb
          ON lb.employee_id = e.id AND lb.year = ?
-       LEFT JOIN leave_types lt_bal
-         ON lt_bal.id = lb.leave_type_id
-
+       LEFT JOIN leave_types lt
+         ON lt.id = lb.leave_type_id
        ${where}
        GROUP BY e.id, e.employee_code, e.full_name, d.name, e.department_name
        ORDER BY e.full_name ASC
        LIMIT ? OFFSET ?`,
-      [year, year, year, ...params, pageSize, offset]
+      [year, ...params, pageSize, offset]
     );
 
     const [countRows] = await pool.query(
@@ -381,23 +336,22 @@ exports.employeeBalances = async (req, res) => {
     );
     const total = countRows[0]?.count || 0;
 
-    const data = rows.map((r) => ({
+    const data = rows.map(r => ({
       employee_id: r.employee_id,
       employee_code: r.employee_code,
       name: r.full_name,
-      department: r.department_name || "N/A",
+      department: r.department_name || 'N/A',
       annualUsed: Number(r.annualUsed || 0),
       annualTotal: Number(r.annualTotal || 0),
       casualUsed: Number(r.casualUsed || 0),
       casualTotal: Number(r.casualTotal || 0),
-      halfDay1: "0 / 0",
-      halfDay2: "0 / 0",
+      halfDay1: '0 / 0',
+      halfDay2: '0 / 0',
     }));
 
-    res.json({ ok: true, page, pageSize, total, data, year });
+    res.json({ ok:true, page, pageSize, total, data, year });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(500).json({ ok:false, message: err.message });
   }
 };
-

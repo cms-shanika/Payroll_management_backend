@@ -1,6 +1,7 @@
 const express = require('express');
 const ctrl = require('../controllers/salary.controller');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const etfEpfCtrl = require('../controllers/etfEpf.controller');
 
 const router = express.Router();
 
@@ -54,6 +55,15 @@ router.post('/bonus', ctrl.addBonus);
 
 // earnings grid
 router.get('/earnings', ctrl.listEarnings);
+
+// ETF/EPF routes
+router.get('/etf-epf', etfEpfCtrl.getEtfEpfRecords);
+router.get('/etf-epf/employees-without', etfEpfCtrl.getEmployeesWithoutEtfEpf);
+router.get('/etf-epf/:id', etfEpfCtrl.getEtfEpfById);
+router.post('/etf-epf', etfEpfCtrl.createEtfEpfRecord);
+router.put('/etf-epf/:id', etfEpfCtrl.updateEtfEpfRecord);
+router.delete('/etf-epf/:id', etfEpfCtrl.deleteEtfEpfRecord);
+router.post('/etf-epf/calculate', etfEpfCtrl.calculateContributions);
 
 // month summary / run payroll
 router.get('/summary', ctrl.monthSummary);

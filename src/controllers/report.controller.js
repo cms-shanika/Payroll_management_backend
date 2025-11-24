@@ -1,13 +1,14 @@
+const { level } = require('winston');
 const pool = require('../config/db');
+const logEvent = require('../utils/event');
 
 const getMonthlyTotalData = async (req, res) => {
   try {
-    // Get month/year from query or default to current
     const month = parseInt(req.query.month, 10) || new Date().getMonth() + 1;
     const year = parseInt(req.query.year, 10) || new Date().getFullYear();
+    const departmentId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
 
-    // Single query from the combined summary table
-    const sql = `
+    let sql = `
       SELECT 
         SUM(total_net_salary) AS net_salary,
         SUM(total_allowances) AS allowances,
@@ -17,8 +18,13 @@ const getMonthlyTotalData = async (req, res) => {
       FROM department_financial_summary
       WHERE period_month = ? AND period_year = ?
     `;
+    const params = [month, year];
+    if (departmentId) {
+      sql += ` AND department_id = ?`;
+      params.push(departmentId);
+    }
 
-    const [rows] = await pool.query(sql, [month, year]);
+    const [rows] = await pool.query(sql, params);
     const totals = rows?.[0] || {};
 
     res.json({
@@ -32,6 +38,9 @@ const getMonthlyTotalData = async (req, res) => {
 
   } catch (err) {
     console.error("Error in getMonthlyTotalData:", err);
+    logEvent({
+      level: 'error', event_type: "GET_PAYROLL_SUMMARY", user_id: req.user?.id || null, event_details: { err }, error_message: err.message
+    })
     res.status(500).json({ error: "Database query failed" });
   }
 };
@@ -46,6 +55,10 @@ const getSalaryRange = async (req, res) => {
     res.json(rows.map(r => r.basic_salary));
   } catch (err) {
     console.error('Failed to fetch salaries:', err);
+    logEvent({level:'error',  event_type: "GET_SALARY_LIST",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message })
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -73,27 +86,46 @@ const compensateTrend = async (req, res) => {
     const [rows] = await pool.query(sql, [months]);
     res.json(rows);
   } catch (err) {
-    console.error("Error in compensateTrendLastMonths:", err);
+    console.error("Error in compensateTrend:", err);
+    logEvent({level:'error',  event_type: "GET_COMPENSATE_TRENDS",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message})
     res.status(500).json({ error: 'Database query failed' });
   }
 };
 
-
 const getDeductionsByType = async (req, res) => {
   try {
     const year = parseInt(req.query.year) || new Date().getFullYear();
+    const departmentId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
 
-    const sql = `
-      SELECT type, SUM(amount) AS total_amount
-      FROM deductions
-      WHERE YEAR(effective_date) = ?
-      GROUP BY type
+    let sql = `
+      SELECT d.type, SUM(d.amount) AS total_amount
+      FROM deductions d
+      INNER JOIN employees e ON d.employee_id = e.id
+      WHERE YEAR(d.effective_date) = ?
     `;
 
-    const [rows] = await pool.query(sql, [year]);
+    const params = [year];
+
+    if (departmentId) {
+      sql += ` AND e.department_id = ?`;
+      params.push(departmentId);
+    }
+
+    sql += ` GROUP BY d.type`;
+
+    const [rows] = await pool.query(sql, params);
     res.json(rows);
   } catch (err) {
     console.error('Error fetching deductions by type:', err);
+    logEvent({
+      level: 'error', event_type: "GET_DEDUCTION_BY_TYPE",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -102,19 +134,35 @@ const getAllowancesByType = async (req, res) => {
   try {
     const month = parseInt(req.query.month, 10) || new Date().getMonth() + 1;
     const year = parseInt(req.query.year, 10) || new Date().getFullYear();
+    const departmentId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
 
-    const sql = `
-      SELECT category as type, SUM(amount) AS total_amount
-      FROM allowances
-      WHERE MONTH(effective_from) = ? AND YEAR(effective_from) = ?
-      GROUP BY category
+    let sql = `
+      SELECT a.category AS type, SUM(a.amount) AS total_amount
+      FROM allowances a
+      INNER JOIN employees e ON a.employee_id = e.id
+      WHERE MONTH(a.effective_from) = ? AND YEAR(a.effective_from) = ?
     `;
 
-    // Pass month first, then year
-    const [rows] = await pool.query(sql, [month, year]);
+    const params = [month, year];
+
+    if (departmentId) {
+      sql += ` AND e.department_id = ?`;
+      params.push(departmentId);
+    }
+
+    sql += ` GROUP BY a.category`;
+
+    const [rows] = await pool.query(sql, params);
     res.json(rows);
   } catch (err) {
     console.error('Error fetching allowances by type:', err);
+    logEvent({
+      level: 'error', event_type: "GET_ALLOWANCE_BY_TYPE",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
+
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -122,12 +170,14 @@ const getAllowancesByType = async (req, res) => {
 const getBonusesByType = async (req, res) => {
   try {
     const year = parseInt(req.query.year, 10) || new Date().getFullYear();
-    const quarter = parseInt(req.query.quarter, 10); // optional 1,2,3,4
+    const quarter = parseInt(req.query.quarter, 10);
+    const departmentId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
 
     let sql = `
-      SELECT reason as type, SUM(amount) AS total_amount
-      FROM bonuses
-      WHERE YEAR(effective_date) = ?
+      SELECT b.reason AS type, SUM(b.amount) AS total_amount
+      FROM bonuses b
+      INNER JOIN employees e ON b.employee_id = e.id
+      WHERE YEAR(b.effective_date) = ?
     `;
 
     const params = [year];
@@ -135,22 +185,33 @@ const getBonusesByType = async (req, res) => {
     if (quarter >= 1 && quarter <= 4) {
       const startMonth = (quarter - 1) * 3 + 1;
       const endMonth = startMonth + 2;
-      sql += ` AND MONTH(effective_date) BETWEEN ? AND ?`;
+      sql += ` AND MONTH(b.effective_date) BETWEEN ? AND ?`;
       params.push(startMonth, endMonth);
     }
 
-    sql += ` GROUP BY reason`;
+    if (departmentId) {
+      sql += ` AND e.department_id = ?`;
+      params.push(departmentId);
+    }
+
+    sql += ` GROUP BY b.reason`;
 
     const [rows] = await pool.query(sql, params);
     res.json(rows);
   } catch (err) {
     console.error('Error fetching bonuses by type:', err);
+    logEvent({
+      level: 'error', event_type: "GET_BONUS_BY_TYPE",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
     res.status(500).json({ error: 'Database query failed' });
   }
 };
 
 
-// Controller to get employee insights with optional department filter
+//get employee insights with optional department filter
 const getEmployeeInsights = async (req, res) => {
   try {
     const { departmentId } = req.query;
@@ -188,7 +249,6 @@ const getEmployeeInsights = async (req, res) => {
       queryParams
     );
 
-    // Send response
     res.json({
       total_employees,
       total_departments,
@@ -199,7 +259,13 @@ const getEmployeeInsights = async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching employee insights:', error);
-    res.status(500).json({ error: 'Database query failed' });
+    logEvent({
+      level: 'error', event_type: "GET_EMPLOYEE_SUMMARY",
+      user_id: req.user?.id || null,
+      event_details: { err },
+      error_message: err.message
+    })
+    res.status(500).json({ ok: false, message: 'Database query failed' });
   }
 };
 
@@ -213,9 +279,6 @@ const getAllDepartments = async (req, res) => {
     res.status(500).json({ error: 'Database query failed' });
   }
 };
-
-
-
 
 module.exports = {
   getMonthlyTotalData, getSalaryRange, compensateTrend, getAllowancesByType, getBonusesByType, getDeductionsByType, getEmployeeInsights, getAllDepartments
