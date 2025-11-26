@@ -75,7 +75,7 @@ exports.createEmployee = async (req, res) => {
 
     appointment_date,
     department, designation, working_office, branch, employment_type,
-    basic_salary, status = 'Active', supervisor, grade, designated_emails, epf_no,
+    basic_salary, status = 'Active', supervisor, grade, designated_emails, epf_no,etf_no,
 
     kin_name, relationship, kin_nic, kin_dob,
   } = req.body;
@@ -107,7 +107,7 @@ exports.createEmployee = async (req, res) => {
         profile_photo_path, created_by_user_id,
         first_name, last_name, initials, calling_name,
         gender, dob, marital_status, nationality, religion, nic,
-        working_office, branch, employment_type, supervisor, grade, designated_emails, epf_no, grade_id)
+        working_office, branch, employment_type, supervisor, grade, designated_emails, etf_no, grade_id)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         null,                       // employee_code
@@ -143,11 +143,23 @@ exports.createEmployee = async (req, res) => {
         supervisor || null,
         grade || null,
         designated_emails || null,
-        epf_no || null,
+        etf_no || null,
         grade_id || null,
       ]
     );
     const employeeId = empIns.insertId;
+
+    if (epf_no) {
+      await conn.query(
+        `INSERT INTO employee_etf_epf (employee_id, epf_number, epf_status) 
+         VALUES (?, ?, 'Active')
+         ON DUPLICATE KEY UPDATE epf_number = VALUES(epf_number)`,
+        [employeeId, epf_no]
+      );
+      
+      // OPTIONAL: Keep local employees.epf_no in sync if legacy systems need it
+      await conn.query('UPDATE employees SET epf_no = ? WHERE id = ?', [epf_no, employeeId]);
+    }
 
     if (basic_salary && !Number.isNaN(Number(basic_salary))) {
       await conn.query(
@@ -239,7 +251,7 @@ exports.createEmployee = async (req, res) => {
       target_table: "employees",
       target_id: null,
       before_state: null,
-      after_state: null,
+      after_state: { employee_id: employeeId, full_name, epf_no, etf_no },
       req,
       status: "FAILURE",
       error_message: e.message
@@ -281,6 +293,16 @@ exports.getEmployeeById = async (req, res) => {
       [id]
     );
     if (!emp) return res.status(404).json({ ok: false, message: 'Not found' });
+
+    // FETCH EPF from separate table
+    const [[epfData]] = await pool.query(
+      'SELECT epf_number FROM employee_etf_epf WHERE employee_id = ?', 
+      [id]
+    );
+    // Overwrite emp.epf_no with the data from the specific table if available
+    if(epfData && epfData.epf_number) {
+      emp.epf_no = epfData.epf_number;
+    }
 
     const [docs] = await pool.query(
       'SELECT id, file_name, file_path, file_type, uploaded_at FROM employee_documents WHERE employee_id = ? ORDER BY id DESC',
@@ -395,6 +417,8 @@ exports.updateEmployee = async (req, res) => {
       grade: body.grade,
       grade_id: grade_id_val,
       designated_emails: body.designated_emails,
+
+      etf_no: body.etf_no,
       epf_no: body.epf_no,
 
       kin_name: body.kin_name,
@@ -417,6 +441,17 @@ exports.updateEmployee = async (req, res) => {
       if (!r.affectedRows) {
         await conn.rollback();
         return res.status(404).json({ ok: false, message: 'Not found' });
+      }
+    }
+
+    // UPDATE EPF in the Separate Table
+    if (body.epf_no) {
+      // Check if record exists
+      const [[exist]] = await conn.query('SELECT id FROM employee_etf_epf WHERE employee_id = ?', [id]);
+      if (exist) {
+        await conn.query('UPDATE employee_etf_epf SET epf_number = ? WHERE employee_id = ?', [body.epf_no, id]);
+      } else {
+        await conn.query('INSERT INTO employee_etf_epf (employee_id, epf_number) VALUES (?, ?)', [id, body.epf_no]);
       }
     }
 

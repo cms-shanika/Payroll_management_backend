@@ -59,6 +59,8 @@ router.get('/earnings', ctrl.listEarnings);
 // ETF/EPF routes
 router.get('/etf-epf', etfEpfCtrl.getEtfEpfRecords);
 router.get('/etf-epf/employees-without', etfEpfCtrl.getEmployeesWithoutEtfEpf);
+
+router.get('/etf-epf/:employeeId/history', etfEpfCtrl.getEmployeePaymentHistory);
 router.get('/etf-epf/:id', etfEpfCtrl.getEtfEpfById);
 router.post('/etf-epf', etfEpfCtrl.createEtfEpfRecord);
 router.put('/etf-epf/:id', etfEpfCtrl.updateEtfEpfRecord);
