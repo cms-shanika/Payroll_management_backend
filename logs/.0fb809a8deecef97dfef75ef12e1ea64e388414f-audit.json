@@ -24,6 +24,31 @@
             "date": 1764032964964,
             "name": "logs\\2025-11-25-events.log",
             "hash": "a06780481104a614402988c75a28261a"
+        },
+        {
+            "date": 1764123194625,
+            "name": "logs\\2025-11-26-events.log",
+            "hash": "bf086164d5eeb5711569c5e57b82dd30"
+        },
+        {
+            "date": 1764207875215,
+            "name": "logs\\2025-11-27-events.log",
+            "hash": "3cc7ea23e94c710c1ba9dcbc2b60c090"
+        },
+        {
+            "date": 1764277952253,
+            "name": "logs\\2025-11-28-events.log",
+            "hash": "1e21c6563ced59645501ed249f1f85e2"
+        },
+        {
+            "date": 1764557112207,
+            "name": "logs\\2025-12-01-events.log",
+            "hash": "973be0e3d7e2187a025440a07d4b2a08"
+        },
+        {
+            "date": 1764616049639,
+            "name": "logs\\2025-12-02-events.log",
+            "hash": "d8d3fabcbf385fd4846302522851a17b"
         }
     ]
 }

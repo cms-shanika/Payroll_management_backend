@@ -355,3 +355,70 @@ exports.employeeBalances = async (req, res) => {
     res.status(500).json({ ok:false, message: err.message });
   }
 };
+
+// =========================================================================
+// 🔹 NEW: Leave Rules (Grade-Based)
+// =========================================================================
+
+/**
+ * Fetches all existing leave rules along with all grades.
+ */
+exports.getRules = async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT 
+         g.grade_id, 
+         g.grade_name,
+         lr.annual_limit,
+         lr.medical_limit
+       FROM grades g
+       LEFT JOIN leave_rules lr ON lr.grade_id = g.grade_id
+       ORDER BY g.grade_id ASC`
+    );
+
+    // Filter out rows where grade_name is null if the grades table isn't clean
+    const data = rows.filter(r => r.grade_name);
+
+    res.json({ ok: true, data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to fetch leave rules' });
+  }
+};
+
+/**
+ * Inserts or updates a leave rule for a specific grade.
+ */
+exports.saveRule = async (req, res) => {
+  const { grade_id, annual_limit, medical_limit } = req.body;
+
+  if (!grade_id || annual_limit === undefined || medical_limit === undefined) {
+    return res.status(400).json({ ok: false, message: 'Grade ID, annual limit, and medical limit are required' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      `INSERT INTO leave_rules (grade_id, annual_limit, medical_limit)
+       VALUES (?,?,?)
+       ON DUPLICATE KEY UPDATE 
+         annual_limit = VALUES(annual_limit), 
+         medical_limit = VALUES(medical_limit),
+         updated_at = CURRENT_TIMESTAMP`,
+      [grade_id, annual_limit, medical_limit]
+    );
+
+    // Fetch the saved rule back to confirm success, including auto-generated ID if created
+    const [rows] = await pool.query(
+      `SELECT lr.id, lr.grade_id, lr.annual_limit, lr.medical_limit, g.grade_name
+       FROM leave_rules lr
+       JOIN grades g ON g.grade_id = lr.grade_id
+       WHERE lr.grade_id = ?`,
+      [grade_id]
+    );
+
+    res.json({ ok: true, data: rows[0], message: 'Leave rule saved successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to save leave rule' });
+  }
+};
