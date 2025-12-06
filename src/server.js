@@ -2,7 +2,7 @@
 require('dotenv').config();
 const app = require('./app');
 const pool = require('./config/db');
-const logEvent = require('./utils/event');
+const logEvent = require('./services/logEvent');
 
 const PORT = process.env.PORT || 4000;
 

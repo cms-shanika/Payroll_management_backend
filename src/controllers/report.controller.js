@@ -1,6 +1,6 @@
 const { level } = require('winston');
 const pool = require('../config/db');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
 
 const getMonthlyTotalData = async (req, res) => {
   try {
@@ -38,9 +38,7 @@ const getMonthlyTotalData = async (req, res) => {
 
   } catch (err) {
     console.error("Error in getMonthlyTotalData:", err);
-    logEvent({
-      level: 'error', event_type: "GET_PAYROLL_SUMMARY", user_id: req.user?.id || null, event_details: { err }, error_message: err.message
-    })
+    logEvent({level: 'error', event_type: "GET_PAYROLL_SUMMARY", user_id: req.user?.id || null, event_details: { err }, error_message: err.message })
     res.status(500).json({ error: "Database query failed" });
   }
 };
@@ -120,12 +118,10 @@ const getDeductionsByType = async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error('Error fetching deductions by type:', err);
-    logEvent({
-      level: 'error', event_type: "GET_DEDUCTION_BY_TYPE",
+    logEvent({level: 'error', event_type: "GET_DEDUCTION_BY_TYPE",
       user_id: req.user?.id || null,
       event_details: { err },
-      error_message: err.message
-    })
+      error_message: err.message})
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -156,12 +152,10 @@ const getAllowancesByType = async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error('Error fetching allowances by type:', err);
-    logEvent({
-      level: 'error', event_type: "GET_ALLOWANCE_BY_TYPE",
+    logEvent({level: 'error', event_type: "GET_ALLOWANCE_BY_TYPE",
       user_id: req.user?.id || null,
       event_details: { err },
-      error_message: err.message
-    })
+      error_message: err.message})
 
     res.status(500).json({ error: 'Database query failed' });
   }
@@ -200,12 +194,10 @@ const getBonusesByType = async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error('Error fetching bonuses by type:', err);
-    logEvent({
-      level: 'error', event_type: "GET_BONUS_BY_TYPE",
+    logEvent({level: 'error', event_type: "GET_BONUS_BY_TYPE",
       user_id: req.user?.id || null,
       event_details: { err },
-      error_message: err.message
-    })
+      error_message: err.message})
     res.status(500).json({ error: 'Database query failed' });
   }
 };
@@ -259,8 +251,7 @@ const getEmployeeInsights = async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching employee insights:', error);
-    logEvent({
-      level: 'error', event_type: "GET_EMPLOYEE_SUMMARY",
+    logEvent({ level: 'error', event_type: "GET_EMPLOYEE_SUMMARY",
       user_id: req.user?.id || null,
       event_details: { err },
       error_message: err.message

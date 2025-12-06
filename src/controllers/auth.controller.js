@@ -1,14 +1,17 @@
 const pool = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const logEvent = require('../utils/event');
+const logEvent = require('../services/logEvent');
 
 exports.login = async (req, res) => {
   const { email, password } = req.body;
   let user = null;
 
   try {
-  const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+  const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]).catch(err => {
+    console.error('Database query error:', err);
+    logEvent({ level: 'error', event_type: "DB_QUERY_ERROR", email, req, extra: { error_message: err.message } });
+  } );
   const user = rows[0];
 
     if (!user) {
@@ -24,7 +27,7 @@ exports.login = async (req, res) => {
 
     const token = jwt.sign(
       { id: user.id, role: user.role, name: user.name, email: user.email },
-      process.env.JWT_SECRET || 'super_secret_change_me',
+      process.env.JWT_SECRET ,
       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
     );
 
